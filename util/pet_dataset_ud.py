@@ -76,7 +76,13 @@ class PETDenoisingDataset(Dataset):
             return target_tensor, condition_tensor, dose_tensor
 
         except Exception as e:
-            # 容错处理：若读取失败，递归尝试加载下一个样本
-            print(f"[!] 样本加载失败 {file_path}: {e}")
+            # 容错处理：若读取失败，尝试加载下一个样本（带递归防护）
+            tries = getattr(self, '_getitem_tries', 0)
+            if tries > len(self.samples):
+                self._getitem_tries = 0
+                raise RuntimeError(
+                    f"所有 {len(self.samples)} 个样本均加载失败，请检查数据完整性: {self.data_dir}"
+                )
+            self._getitem_tries = tries + 1
             new_idx = (idx + 1) % len(self.samples)
             return self.__getitem__(new_idx)
