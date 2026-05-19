@@ -2,10 +2,17 @@
 TriDo-JiT Denoiser: Flow Matching Wrapper with FGW Regularization
 ===================================================================
 Wraps the TriDoJiT model with Flow Matching training and inference.
-[已根据 JiT 论文恢复] 网络直接预测 x_pred (clean image)，速度场 v 仅作为辅助的 loss 加权形式。
+Uses v-prediction (velocity prediction) — same formulation as the _ud version.
 
-Training: v_pred = (x_pred - z) / clamp(1 - t), target = clean - condition
-Inference: Heun's 2nd-order ODE solver with CFG
+Key extensions over the _ud Denoiser:
+  - FGW (Fused Gromov-Wasserstein) loss as structural regularizer
+  - Frequency-domain loss from GFP module
+  - Sinogram consistency loss (optional)
+
+Training: v_pred = (x_pred - z) / (1 - t), target = clean - condition
+Inference: Heun's 2nd-order ODE solver with CFG (classifier-free guidance)
+
+Reference: Flow Matching for Generative Modeling (Lipman et al., 2023)
 """
 
 import torch
@@ -21,6 +28,30 @@ except ImportError:
 
 
 class TriDoDenoiser(nn.Module):
+    """
+    Flow Matching denoiser for TriDo-JiT.
+
+    Training:
+      - Primary: v-prediction Huber loss (Flow Matching)
+      - Regularizer: FGW structural loss
+      - Optional: frequency consistency loss, sino consistency loss
+
+    Inference:
+      - Heun's 2nd-order ODE solver
+      - Classifier-Free Guidance (CFG)
+      - Supports body-part conditioned sampling
+
+    Args:
+        args: Argument namespace containing:
+            - img_size, patch_size, attn_dropout, proj_dropout
+            - P_mean, P_std (logit-normal timestep sampling params)
+            - cond_drop_prob (CFG dropout rate)
+            - cfg_scale (inference guidance scale)
+            - model_size ('Large', 'Base', 'Small')
+            - fgw_weight, freq_weight (loss weights)
+            - use_sino_domain, use_freq_domain
+    """
+
     def __init__(self, args):
         super().__init__()
 
@@ -57,7 +88,7 @@ class TriDoDenoiser(nn.Module):
             reg=0.1, feature_weight=1.0
         )
 
-        # Structural consistency
+        # Structural consistency (fast Gram-based alternative)
         self.struct_loss = StructuralConsistencyLoss(weight=1.0)
 
         # EMA
@@ -66,49 +97,75 @@ class TriDoDenoiser(nn.Module):
         self.ema_params = [p.clone().detach() for p in self.net.parameters()]
 
     def sample_t(self, n, device):
+        """Logit-normal timestep sampling."""
         z = torch.randn(n, device=device) * self.P_std + self.P_mean
         return torch.sigmoid(z)
 
     def forward(self, target, condition, body_part):
+        """
+        Training forward pass with Flow Matching + FGW regularization.
+
+        Args:
+            target: (B, 1, H, W) — clean full-dose PET image
+            condition: (B, 1, H, W) — low-dose PET image
+            body_part: (B,) LongTensor — body part category (0=brain, 1=chest, 2=abdomen)
+
+        Returns:
+            total_loss: scalar (v-prediction Huber + FGW + freq + struct)
+        """
         bsz = target.size(0)
         device = target.device
 
+        # --- Flow Matching: sample t, interpolate ---
         t = self.sample_t(bsz, device=device)
         t_reshape = t.view(-1, 1, 1, 1)
 
+        # Interpolation: z = t * target + (1-t) * condition
         z = t_reshape * target + (1 - t_reshape) * condition
 
+        # CFG: randomly drop condition
         drop_mask = (torch.rand(bsz, 1, 1, 1, device=device) > self.cond_drop_prob).float()
         condition_input = condition * drop_mask
 
+        # Model input: concatenate z and condition
         model_input = torch.cat([z, condition_input], dim=1)  # (B, 2, H, W)
 
-        # 网络直接预测 x_pred (clean image)
+        # --- Forward through TriDoJiT ---
         x_pred = self.net(model_input, t.flatten(), body_part)  # (B, 1, H, W)
 
-        # 将 x_pred 转换为 v_pred 进行带权重的速度场损失计算 (遵循 JiT 论文设计)
+        # --- v-prediction loss ---
         denom = torch.clamp(1.0 - t_reshape, min=0.05)
         v_pred = (x_pred - z) / denom
         v_target = target - condition
 
         loss_v = F.smooth_l1_loss(v_pred, v_target, beta=0.1)
 
-        # 辅助损失直接约束 x_pred
+        # --- FGW structural loss (on predicted clean image) ---
+        # Reconstruct clean prediction from v_pred
+        with torch.no_grad():
+            x_clean_from_v = z + v_pred * (1.0 - t_reshape)
+
         loss_fgw = self.fgw_loss(x_pred, target)
+
+        # --- Structural consistency (Gram-based, faster) ---
         loss_struct = self.struct_loss(x_pred, target)
 
+        # --- Frequency loss (from GFP) ---
         if hasattr(self.net, 'gfp') and self.net.gfp is not None:
             loss_freq = self.net.gfp.compute_frequency_loss(x_pred, target)
         else:
             loss_freq = torch.tensor(0.0, device=device)
 
+        # --- Sinogram consistency loss ---
         loss_sino = torch.tensor(0.0, device=device)
         if hasattr(self.net, 'sino_bridge') and self.net.sino_bridge is not None:
+            # Forward project both and compare in sinogram domain
             with torch.no_grad():
                 sino_target = self.net.sino_bridge.forward_project(target)
             sino_pred = self.net.sino_bridge.forward_project(x_pred)
             loss_sino = F.l1_loss(sino_pred, sino_target)
 
+        # --- Total loss ---
         total_loss = (
             loss_v
             + self.fgw_weight * loss_fgw
@@ -117,6 +174,7 @@ class TriDoDenoiser(nn.Module):
             + self.sino_weight * loss_sino
         )
 
+        # Store for logging
         self._last_losses = {
             'v_loss': loss_v.item(),
             'fgw_loss': loss_fgw.item(),
@@ -129,6 +187,7 @@ class TriDoDenoiser(nn.Module):
         return total_loss
 
     def get_last_losses(self):
+        """Return the breakdown of the last computed loss."""
         return getattr(self, '_last_losses', {})
 
     @torch.no_grad()
@@ -152,6 +211,20 @@ class TriDoDenoiser(nn.Module):
 
     @torch.no_grad()
     def generate(self, condition, body_part, steps=50, cfg_scale=None):
+        """
+        Generate denoised PET image via Flow Matching ODE sampling.
+
+        Uses Heun's 2nd-order method with Classifier-Free Guidance.
+
+        Args:
+            condition: (B, 1, H, W) — low-dose PET image
+            body_part: (B,) LongTensor — body part category (0=brain, 1=chest, 2=abdomen)
+            steps: Number of ODE integration steps
+            cfg_scale: CFG scale (defaults to self.cfg_scale)
+
+        Returns:
+            denoised: (B, 1, H, W) — high-quality PET image
+        """
         device = condition.device
         bsz = condition.size(0)
 
@@ -162,6 +235,7 @@ class TriDoDenoiser(nn.Module):
         timesteps = torch.linspace(0.0, 1.0, steps + 1, device=device)
         uncond_condition = torch.zeros_like(condition)
 
+        # [双路并行适配]：将 body_part 复制一份（CFG 条件+无条件）
         body_in = torch.cat([body_part, body_part], dim=0)
 
         for i in range(steps):
