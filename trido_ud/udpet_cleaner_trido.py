@@ -100,15 +100,90 @@ def center_crop_numpy(img_array, target_size=256):
 #  病人发现与剂量解析
 # ═══════════════════════════════════════════════════════════════════════
 
+def _is_full_dose_dir(dirpath):
+    """Check if a directory is a full-dose scan directory by its name.
+
+    Strategy A (Bern-Inselspital): basename contains 'full dose', 'drf_100', '100 dose'
+    Strategy B (Shanghai-Ruijin):  basename contains 'normal' (WB scan protocol)
+    """
+    basename_lower = os.path.basename(dirpath).lower()
+    # Bern pattern
+    if "full dose" in basename_lower or "100 dose" in basename_lower or "drf_100" in basename_lower:
+        return True
+    # Shanghai pattern: "2.886 x 600 WB NORMAL"
+    if "normal" in basename_lower:
+        return True
+    return False
+
+
+def _is_dicom_dir(dirpath):
+    """Check if a directory contains at least one DICOM file."""
+    try:
+        for f in os.listdir(dirpath):
+            if f.lower().endswith((".dcm", ".ima")):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _parse_wb_param(dirname):
+    """Extract the numeric parameter from a WB scan protocol directory name.
+
+    Example: '2.886 x 600 WB NORMAL' → 600, '2.886 x 150 WB NORMAL' → 150
+    Returns None if the name doesn't match the WB pattern.
+    """
+    m = re.match(r"[\d.]+\s*x\s*(\d+)\s*wb", dirname.lower().strip())
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _resolve_low_dose_denom(low_dirname, full_dirname, full_param):
+    """Determine dose denominator for a low-dose directory.
+
+    Strategy A (Bern): DOSE_MAPPING keywords in directory name → explicit denom
+    Strategy B (Shanghai): WB protocol name → ratio of full_param / low_param
+    Returns (denom, is_match) — is_match=False means skip this directory.
+    """
+    dl = low_dirname.lower().strip()
+
+    # Strategy A: Bern-style dose keywords (1-2, d4, 1_10, etc.)
+    for keyword, denom in UDPETCleanerConfig.DOSE_MAPPING.items():
+        if keyword in dl and "1000" not in dl:
+            return denom, True
+
+    # Strategy B: Shanghai-style WB protocol → ratio
+    if full_param is not None:
+        low_param = _parse_wb_param(low_dirname)
+        if low_param is not None and low_param > 0:
+            if full_param > low_param and full_param % low_param == 0:
+                denom = full_param // low_param
+                if denom > 1:
+                    return denom, True
+
+    # Strategy C: universal fallback — directory contains DICOM but no dose info
+    # Return denom=-1 as a flag meaning "unknown dose, try to infer later"
+    return -1, False
+
+
 def discover_patients(root_dirs):
     """
     扫描所有数据源, 构建病人清单。
+
+    采用「自上而下」策略:
+      1. Walk 整棵树, 找到所有 full-dose 目录 (名称含 full/normal/drf_100)
+      2. 从父目录(病人级)发现所有低剂量兄弟目录
+      3. 多策略解析剂量分母 (Bern 关键词 + Shanghai WB比值 + 通用回退)
+
     返回: list of dict {
-        patient_id, full_dose_dir, low_dose_dirs: [(path, dose_denom), ...],
+        patient_dir, patient_id, full_dose_dir,
+        low_dose_pairs: [(path, dose_denom), ...],
         uid, gender, age, manufacturer
     }
     """
     patients = []
+    seen_full_dose = set()  # 防止同一个 full_dose_dir 被重复处理
 
     for root_dir in root_dirs:
         if not os.path.exists(root_dir):
@@ -117,54 +192,72 @@ def discover_patients(root_dirs):
 
         print(f"  [扫描] {root_dir} ...")
         for dirpath, dirnames, _ in os.walk(root_dir):
-            # 找到包含 dose/drf 子目录的文件夹 → 认定为病人目录
-            dose_subdirs = [
-                d
-                for d in dirnames
-                if "dose" in d.lower() or "drf" in d.lower()
-            ]
-            if not dose_subdirs:
+            # 只关注 full-dose 目录本身 (basename 含 full/normal/drf_100)
+            if not _is_full_dose_dir(dirpath):
                 continue
 
-            patient_dir = dirpath
-            patient_id = os.path.basename(patient_dir)
+            full_dose_dir = dirpath
+            if full_dose_dir in seen_full_dose:
+                continue
+            seen_full_dose.add(full_dose_dir)
 
-            # 找 full-dose 目录
-            full_dose_dir = None
-            for d in dose_subdirs:
-                dl = d.lower()
-                if "full dose" in dl or "100 dose" in dl or "drf_100" in dl:
-                    full_dose_dir = os.path.join(patient_dir, d)
-                    break
-            if full_dose_dir is None:
+            # 父目录 = 病人/采集目录
+            patient_dir = os.path.dirname(full_dose_dir)
+            if not os.path.isdir(patient_dir):
                 continue
 
-            # 解析低剂量目录
+            # 解析 full-dose 的 WB 参数 (Shanghai), 用于后续低剂量比值计算
+            full_wb_param = _parse_wb_param(os.path.basename(full_dose_dir))
+
+            # ── 发现所有兄弟目录作为候选剂量目录 ──
+            try:
+                siblings = os.listdir(patient_dir)
+            except Exception:
+                continue
+
             low_dose_pairs = []
-            for d in dose_subdirs:
-                full_path = os.path.join(patient_dir, d)
-                if full_path == full_dose_dir:
+            for sib in siblings:
+                sib_path = os.path.join(patient_dir, sib)
+                if not os.path.isdir(sib_path) or sib_path == full_dose_dir:
                     continue
-                dl = d.lower()
-                for keyword, denom in UDPETCleanerConfig.DOSE_MAPPING.items():
-                    if keyword in dl and "1000" not in dl:
-                        low_dose_pairs.append((full_path, denom))
-                        break
+
+                denom, is_low_dose = _resolve_low_dose_denom(
+                    sib, os.path.basename(full_dose_dir), full_wb_param
+                )
+                if not is_low_dose:
+                    continue
+                low_dose_pairs.append((sib_path, denom))
+
+            # ── 额外扫描: Bern 数据中可能有 dose 子目录嵌套在日期文件夹下,
+            #     但有些低剂量文件夹未直接匹配关键词 (如 'dose_1-2' vs '1-2_dose')
+            #     对任何含 DICOM 文件的兄弟目录且不在现有列表中的, 再尝试匹配 ──
+            for sib in siblings:
+                sib_path = os.path.join(patient_dir, sib)
+                if (not os.path.isdir(sib_path) or sib_path == full_dose_dir
+                        or any(sib_path == lp[0] for lp in low_dose_pairs)):
+                    continue
+                if _is_dicom_dir(sib_path):
+                    # 尝试 Bern 关键词
+                    denom, matched = _resolve_low_dose_denom(
+                        sib, os.path.basename(full_dose_dir), full_wb_param
+                    )
+                    if matched:
+                        low_dose_pairs.append((sib_path, denom))
 
             if not low_dose_pairs:
                 continue
 
-            # 读 DICOM 元数据
+            # ── 读 DICOM 元数据 ──
             try:
                 dcm_files = [
-                    f
-                    for f in os.listdir(full_dose_dir)
+                    f for f in os.listdir(full_dose_dir)
                     if f.lower().endswith((".dcm", ".ima"))
                 ]
                 if not dcm_files:
                     continue
                 dcm = pydicom.dcmread(
-                    os.path.join(full_dose_dir, dcm_files[0]), stop_before_pixels=True
+                    os.path.join(full_dose_dir, dcm_files[0]),
+                    stop_before_pixels=True,
                 )
                 uid = getattr(dcm, "StudyInstanceUID", patient_dir)
                 gender = getattr(dcm, "PatientSex", "Unknown")
@@ -185,6 +278,9 @@ def discover_patients(root_dirs):
 
             except Exception:
                 continue
+
+            # 使用父目录 basename 作为可读 ID (Bern: 日期文件夹, Shanghai: Anonymous_ANO_xxxx)
+            patient_id = os.path.basename(patient_dir)
 
             patients.append(
                 {
