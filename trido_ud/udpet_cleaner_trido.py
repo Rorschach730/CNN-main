@@ -3,7 +3,7 @@ UDPET Cleaner (TriDo v2) — Optimized Data Pipeline
 ====================================================
 改进点:
   1. float16 存储 (源 DICOM 为 int16, float16 无损覆盖 → 2x 缩减)
-  2. 保留脑部+躯干切片 (0–670mm from top, 去掉下肢 → ~40% 缩减)
+  2. 保留脑部+躯干切片 (SUV动态检测脑顶+腹部终止, 自动跳空气+去下肢 → ~40% 缩减)
   3. train/val/test = 7:1.5:1.5 病人级切分 (防数据泄漏)
   4. 按 manufacturer/gender/age 分层抽样
   5. torch.save 内置 zip 压缩 (额外 ~10-15%)
@@ -38,9 +38,12 @@ class UDPETCleanerConfig:
     OUTPUT_DIR = "I:/processed_data_trido"
     TARGET_SIZE = 256
 
-    # ── 过滤窗口 (mm from top): 0=脑顶, 保留脑部+躯干, 去掉下肢 ──
-    TORSO_START_MM = 0.0
-    TORSO_LENGTH_MM = 670.0  # 窗口宽度: 0–670mm = 脑+胸+腹
+    # ── SUV-based 解剖检测: 用图像内容自动判断脑顶和腹部终止 ──
+    BACKGROUND_SUV = 0.1          # SUV 低于此 → 空气/背景
+    BRAIN_MEAN_SUV = 0.4          # 前景像素平均 SUV 超过此值 → 脑组织
+    BRAIN_MIN_FOREGROUND = 100    # 最少前景像素数 (排除噪声切片)
+    BODY_AREA_RATIO = 0.45        # 身体面积 < max_area * ratio → 下肢区域
+    BODY_SMOOTH_WINDOW = 5        # 身体面积平滑窗口 (切片数)
 
     # ── train/val/test 比例 ──
     SPLIT_RATIOS = (0.70, 0.15, 0.15)
@@ -72,6 +75,95 @@ def calculate_suv_factor(dcm_hdr):
         return (slope * weight) / dose, intercept
     except Exception:
         return None, None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  SUV-based 解剖边界检测 (替代硬编码 0–670mm)
+# ═══════════════════════════════════════════════════════════════════════
+
+def detect_brain_top(slices_sorted, background_suv=0.1, brain_mean_suv=0.4,
+                     min_foreground=100):
+    """基于 SUV 值动态检测脑部顶层起始位置。
+
+    从扫描顶部向下遍历切片。当某个切片中前景像素（SUV > background_suv）
+    的平均 SUV 超过 brain_mean_suv 且前景像素数 ≥ min_foreground 时，
+    判定该切片为脑顶。
+
+    这自动跳过头顶以上的空气/噪声切片，比依赖 DICOM ImagePositionPatient
+    硬编码距离更鲁棒。
+
+    Args:
+        slices_sorted: [(z_pos, suv_array), ...] 按 z 升序排列（头部在前）
+        background_suv: 低于此 SUV 的像素视为背景/空气
+        brain_mean_suv: 前景平均 SUV 阈值，超过即判定为脑组织
+        min_foreground: 最少前景像素数，防止噪声切片误判
+
+    Returns:
+        brain_top_idx: 脑顶切片在 slices_sorted 中的索引
+    """
+    for i, (_z, suv) in enumerate(slices_sorted):
+        foreground = suv[suv > background_suv]
+        if len(foreground) < min_foreground:
+            continue
+        if foreground.mean() > brain_mean_suv:
+            return i
+    # 未检测到明显脑组织 → 从第一个切片开始
+    return 0
+
+
+def detect_abdomen_end(slices_sorted, body_threshold=0.1, area_ratio=0.45,
+                       smooth_window=5):
+    """基于身体截面积动态检测腹部终止位置（下肢起始）。
+
+    计算每个切片中身体区域的像素数（SUV > body_threshold），
+    经滑动平均平滑后，从底部向上扫描：第一个身体面积超过
+    max_chest_area * area_ratio 的位置即为腹部/骨盆与下肢的分界。
+
+    下肢的横截面积显著小于胸腹部（两条腿 vs 一个躯干），
+    因此面积比阈值能有效区分。
+
+    Args:
+        slices_sorted: [(z_pos, suv_array), ...] 按 z 升序排列
+        body_threshold: SUV 超过此值 → 身体组织像素
+        area_ratio: 面积低于 max_area * ratio → 判定为下肢
+        smooth_window: 滑动平均窗口大小（切片数）
+
+    Returns:
+        abdomen_end_idx: 腹部最后一个切片的索引（含），之后为下肢
+    """
+    n = len(slices_sorted)
+    if n == 0:
+        return 0
+
+    # 每个切片的身体面积（像素数）
+    areas = np.array([np.sum(suv > body_threshold) for _, suv in slices_sorted],
+                     dtype=np.float64)
+
+    # 滑动平均平滑，消除单个切片的噪声波动
+    if smooth_window > 1 and n >= smooth_window:
+        kernel = np.ones(smooth_window) / smooth_window
+        areas_smooth = np.convolve(areas, kernel, mode='same')
+    else:
+        areas_smooth = areas
+
+    # 找最大胸腹面积（跳过 ~前 15% 的头部区域，头部截面积较小会干扰 max）
+    head_skip = max(1, n // 7)
+    if head_skip < n:
+        max_area = np.max(areas_smooth[head_skip:])
+    else:
+        max_area = np.max(areas_smooth)
+
+    if max_area == 0:
+        return n - 1
+
+    cutoff = max_area * area_ratio
+
+    # 从底部（脚）向上扫描：第一个面积 > cutoff 的位置 = 腹部终止
+    for i in range(n - 1, head_skip, -1):
+        if areas_smooth[i] > cutoff:
+            return i
+
+    return n - 1
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -365,14 +457,19 @@ def stratified_split_by_patient(patients, ratios, seed):
 def process_patient(patient, output_base, split_name, config):
     """
     处理单个病人的一组 (full-dose, low-dose) 配对。
-    仅保存 0–670mm 范围 (脑部+躯干, 去掉下肢)。
+    基于 SUV 分布自动检测脑顶和腹部终止, 仅保留脑部+躯干, 去掉下肢。
     输出 float16 .pt 文件。
     """
     full_dir = patient["full_dose_dir"]
     target_size = config.TARGET_SIZE
-    torso_start = config.TORSO_START_MM
-    torso_end = config.TORSO_START_MM + config.TORSO_LENGTH_MM
     save_dtype = config.SAVE_DTYPE
+
+    # ── SUV-based 检测参数 ──
+    background_suv = config.BACKGROUND_SUV
+    brain_mean_suv = config.BRAIN_MEAN_SUV
+    brain_min_fg = config.BRAIN_MIN_FOREGROUND
+    body_area_ratio = config.BODY_AREA_RATIO
+    body_smooth = config.BODY_SMOOTH_WINDOW
 
     # ── 加载 full-dose slices ──
     full_slices = []
@@ -394,16 +491,29 @@ def process_patient(patient, output_base, split_name, config):
     if not full_slices:
         return 0
 
-    # ── 过滤: 仅保留 0–670mm 范围 (脑部+躯干, 去掉下肢) ──
-    # DICOM Z coordinates in this dataset: Z↑ = toward feet (Z小=头部, Z大=脚部).
-    # Sort ascending → head first, feet last.
+    # ── 排序: Z 升序 = 头部在前, 脚部在后 ──
     full_slices.sort(key=lambda x: x[0])
-    head_z = full_slices[0][0]  # smallest Z = top of head
-    torso_full = []
-    for fz, fpx in full_slices:
-        dist_from_head = fz - head_z  # always >= 0 in ascending order
-        if torso_start <= dist_from_head <= torso_end:
-            torso_full.append((fz, fpx))
+
+    # ── Step 1: SUV 动态检测脑顶 (跳过空气切片) ──
+    brain_top_idx = detect_brain_top(
+        full_slices,
+        background_suv=background_suv,
+        brain_mean_suv=brain_mean_suv,
+        min_foreground=brain_min_fg,
+    )
+
+    # ── Step 2: SUV 动态检测腹部终止 (下肢起始) ──
+    # 从脑顶开始扫描, 因为脑顶以上都是空气/噪声
+    body_slices = full_slices[brain_top_idx:]
+    abdomen_end_idx = detect_abdomen_end(
+        body_slices,
+        body_threshold=background_suv,
+        area_ratio=body_area_ratio,
+        smooth_window=body_smooth,
+    )
+
+    # ── Step 3: 提取脑顶 → 腹部终止的切片 ──
+    torso_full = body_slices[: abdomen_end_idx + 1]
 
     if not torso_full:
         return 0
@@ -519,7 +629,7 @@ def main():
 
     # ── 阶段 3: 处理并保存 ──
     print("\n" + "=" * 60)
-    print(f"[阶段 3] 处理数据 (float16, 脑+躯干 0–{config.TORSO_START_MM+config.TORSO_LENGTH_MM}mm, 去掉下肢)...")
+    print(f"[阶段 3] 处理数据 (float16, SUV动态检测脑顶+腹部终止, 去掉下肢)...")
     print("=" * 60)
 
     total_saved = 0
@@ -550,7 +660,7 @@ def main():
         print(f"  [{split_name}] 保存 {split_saved} 个切片")
 
     print(f"\n[完成] 共保存 {total_saved} 个切片 → {config.OUTPUT_DIR}")
-    print(f"        精度: {config.SAVE_DTYPE} | 过滤窗口: 0–{config.TORSO_START_MM+config.TORSO_LENGTH_MM}mm (脑+躯干)")
+    print(f"        精度: {config.SAVE_DTYPE} | 过滤: SUV动态检测 (脑顶→腹部, 自动跳空气+去下肢)")
 
 
 if __name__ == "__main__":
