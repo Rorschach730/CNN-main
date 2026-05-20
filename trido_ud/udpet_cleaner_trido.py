@@ -35,7 +35,7 @@ class UDPETCleanerConfig:
         "H:/Shanghai-Ruijin-Hospital-2022",
         "H:/Shanghai-Ruijin-Hospital-2023",
     ]
-    OUTPUT_DIR = "../processed_data_trido"
+    OUTPUT_DIR = "I:/processed_data_trido"
     TARGET_SIZE = 256
 
     # ── 过滤窗口 (mm from top): 0=脑顶, 保留脑部+躯干, 去掉下肢 ──
