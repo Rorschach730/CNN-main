@@ -112,6 +112,7 @@ class TriDoPETDataset(Dataset):
 
         Priority:
           1. body_part_map dict: match patient prefix → 0/1/2
+             (P[0-9]+ regex only matches old P0001-style IDs; new IDs use cleaner-baked body_part)
           2. body_part_map callable: invoke fn(filename) → 0/1/2
           3. Z-slice heuristics: Z0000-0049→0(brain), Z0050-0119→1(chest), Z0120+→2(abdomen)
         """
