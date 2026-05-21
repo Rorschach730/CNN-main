@@ -266,7 +266,7 @@ def _resolve_low_dose_denom(low_dirname):
     Returns (denom, is_match) — is_match=False means skip this directory.
     """
     dl = low_dirname.lower().strip()
-    for keyword, denom in UDPETCleanerConfig.DOSE_MAPPING.items():
+    for keyword, denom in sorted(UDPETCleanerConfig.DOSE_MAPPING.items(), key=lambda x: -len(x[0])):
         if keyword in dl and "1000" not in dl:
             return denom, True
     return -1, False
@@ -571,8 +571,8 @@ def process_patient(patient, output_base, split_name, config):
             else:
                 body_part = 2   # abdomen (50%~脚底)
 
-            bp_tensor = torch.full((1, target_size, target_size),
-                                   body_part, dtype=torch.uint8)
+            bp_tensor = torch.full((target_size, target_size),
+                                   body_part, dtype=torch.float32)
 
             tensor_pair = torch.stack([
                 bp_tensor,                       # [0] body_part label
