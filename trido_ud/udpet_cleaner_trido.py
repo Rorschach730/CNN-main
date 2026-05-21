@@ -225,13 +225,43 @@ def _is_dicom_dir(dirpath):
     return False
 
 
+def _resolve_patient_dir(dirpath, root_dir, grouping_depth_cache):
+    """
+    从 DICOM 目录路径向上回溯找到病人级目录。
+
+    Bern 结构:   root/Subject_X-Y/日期/Full_dose/*.IMA
+                 → 需要跳过日期层，上溯 2 级到 Subject_X-Y
+    Shanghai 结构: root/PART1/Anonymous/2.886x600 WB NORMAL/*.dcm
+                 → 上溯 1 级到 PART1/Anonymous
+
+    通过根目录名自动检测结构类型，结果缓存到 grouping_depth_cache。
+    """
+    # 检查缓存
+    root_key = root_dir.rstrip("/\\")
+    if root_key not in grouping_depth_cache:
+        root_name = os.path.basename(root_key).lower()
+        if "bern" in root_name:
+            depth = 2  # 跳过日期层
+            print(f"    [分组深度] 检测到 Bern 结构 → 上溯 {depth} 级到病人目录")
+        else:
+            depth = 1
+            print(f"    [分组深度] 检测到非 Bern 结构 → 上溯 {depth} 级到病人目录")
+        grouping_depth_cache[root_key] = depth
+
+    depth = grouping_depth_cache[root_key]
+    p = dirpath
+    for _ in range(depth):
+        p = os.path.dirname(p)
+    return p
+
+
 def discover_patients(root_dirs):
     """
     Dose-driven patient discovery — 完全不依赖命名约定。
 
     策略 (自上而下):
       1. Walk 整棵树，找到所有含 DICOM 文件的子目录
-      2. 按父目录分组（父目录 = 病人级）
+      2. 按病人目录分组（自动检测 Bern/Shanghai 目录深度差异）
       3. 从每个 DICOM 目录的第一个文件读取 RadionuclideTotalDose
       4. 最大剂量 = Full dose, 其余 = low-dose pairs (denom = round(full/low))
       5. FDG 过滤 + 元数据提取
@@ -247,6 +277,20 @@ def discover_patients(root_dirs):
     """
     patients = []
     seen_patient_dirs = set()
+    grouping_depth_cache = {}
+
+    # ── 全局调试计数器 ──
+    stats = {
+        "total_dcm_dirs": 0,
+        "total_ima_files": 0,
+        "total_dcm_files": 0,
+        "grouped_patients": 0,
+        "skipped_single_dose": 0,
+        "skipped_dose_read_error": 0,
+        "skipped_denom_lt2": 0,
+        "skipped_non_fdg": 0,
+        "skipped_metadata_error": 0,
+    }
 
     for root_dir in root_dirs:
         if not os.path.exists(root_dir):
@@ -255,29 +299,65 @@ def discover_patients(root_dirs):
 
         print(f"  [扫描] {root_dir} ...")
 
-        # ── Step 1: 收集所有含 DICOM 文件的目录，按父目录分组 ──
+        # ── Step 1: 收集所有含 DICOM 文件的目录，按病人目录分组 ──
         # parent_dir → [(subdir_path, first_dcm_path), ...]
         parent_to_dicom_dirs = defaultdict(list)
+        dir_dcm_count = 0
+        dir_ima_count = 0
+        dir_dcm_ext_count = 0
 
         for dirpath, _dirnames, filenames in os.walk(root_dir):
-            dcm_files = [f for f in filenames
-                         if f.lower().endswith((".dcm", ".ima"))]
+            dcm_by_ima = [f for f in filenames
+                          if f.lower().endswith(".ima")]
+            dcm_by_dcm = [f for f in filenames
+                          if f.lower().endswith(".dcm")]
+            dcm_files = dcm_by_ima + dcm_by_dcm
+
+            if dcm_files:
+                # 统计文件类型
+                if dcm_by_ima:
+                    dir_ima_count += 1
+                    stats["total_ima_files"] += len(dcm_by_ima)
+                if dcm_by_dcm:
+                    dir_dcm_ext_count += 1
+                    stats["total_dcm_files"] += len(dcm_by_dcm)
+
             if not dcm_files:
                 continue
 
-            parent_dir = os.path.dirname(dirpath)
+            dir_dcm_count += 1
+            stats["total_dcm_dirs"] += 1
+
+            # 自动检测分组深度: Bern 上溯2级, Shanghai 上溯1级
+            patient_dir = _resolve_patient_dir(
+                dirpath, root_dir, grouping_depth_cache
+            )
             first_dcm = os.path.join(dirpath, dcm_files[0])
-            parent_to_dicom_dirs[parent_dir].append((dirpath, first_dcm))
+            parent_to_dicom_dirs[patient_dir].append((dirpath, first_dcm))
+
+        # ── 调试: 输出本 root 的扫描统计 ──
+        print(f"    → 含 DICOM 的目录数: {dir_dcm_count}")
+        print(f"      其中含 .IMA 的目录: {dir_ima_count}, .dcm 的目录: {dir_dcm_ext_count}")
+        print(f"      .IMA 文件总数: {stats['total_ima_files']}, .dcm 文件总数: {stats['total_dcm_files']}")
+        print(f"    → 分组后候选病人目录数: {len(parent_to_dicom_dirs)}")
 
         if not parent_to_dicom_dirs:
-            print(f"    未发现任何 DICOM 目录")
+            print(f"    ⚠️  未发现任何 DICOM 目录")
             continue
+
+        # ── Show dose-count distribution for debugging ──
+        dose_count_dist = {}
+        for entries in parent_to_dicom_dirs.values():
+            n = len(entries)
+            dose_count_dist[n] = dose_count_dist.get(n, 0) + 1
+        print(f"    → 剂量目录数分布: {dict(sorted(dose_count_dist.items()))}")
 
         # ── Step 2: 逐病人处理 ──
         for patient_dir, dose_entries in parent_to_dicom_dirs.items():
             if patient_dir in seen_patient_dirs:
                 continue
             if len(dose_entries) < 2:
+                stats["skipped_single_dose"] += 1
                 continue  # 需要至少 full + 一个 low-dose
 
             # Step 3: 读取每个 DICOM 目录的真实剂量
@@ -292,6 +372,7 @@ def discover_patients(root_dirs):
                     continue
 
             if len(dose_data) < 2:
+                stats["skipped_dose_read_error"] += 1
                 continue
 
             # Step 4: 最大剂量 = Full dose
@@ -309,6 +390,7 @@ def discover_patients(root_dirs):
                 low_dose_pairs.append((low_dir, denom))
 
             if not low_dose_pairs:
+                stats["skipped_denom_lt2"] += 1
                 continue
 
             # Step 6: 从 full-dose DICOM 提取元数据 + FDG 过滤
@@ -328,11 +410,14 @@ def discover_patients(root_dirs):
                         "Unknown",
                     )
                 if "FDG" not in tracer.upper() and "FLUORODEOXYGLUCOSE" not in tracer.upper():
+                    stats["skipped_non_fdg"] += 1
                     continue
             except Exception:
+                stats["skipped_metadata_error"] += 1
                 continue
 
             seen_patient_dirs.add(patient_dir)
+            stats["grouped_patients"] += 1
             patient_id = os.path.basename(patient_dir)
 
             patients.append({
@@ -345,6 +430,19 @@ def discover_patients(root_dirs):
                 "age": age,
                 "manufacturer": manufacturer,
             })
+
+    # ── 全局调试总结 ──
+    print(f"\n  ═══ discover_patients 调试总结 ═══")
+    print(f"  总扫描含 DICOM 的目录: {stats['total_dcm_dirs']}")
+    print(f"  .IMA 文件数: {stats['total_ima_files']}, .dcm 文件数: {stats['total_dcm_files']}")
+    print(f"  最终有效病人: {stats['grouped_patients']}")
+    print(f"  过滤原因:")
+    print(f"    - 仅1个剂量目录: {stats['skipped_single_dose']}")
+    print(f"    - 剂量读取失败: {stats['skipped_dose_read_error']}")
+    print(f"    - denom<2 无效:  {stats['skipped_denom_lt2']}")
+    print(f"    - 非FDG示踪剂: {stats['skipped_non_fdg']}")
+    print(f"    - 元数据提取失败: {stats['skipped_metadata_error']}")
+    print(f"  ═══════════════════════════════════\n")
 
     return patients
 
