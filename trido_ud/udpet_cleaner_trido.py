@@ -15,8 +15,10 @@ v2 文档骨架 + v3 解剖检测 + 目录名驱动剂量发现。
 
 ┌─ BUGFIX: Tensor 顺序修正 ─────────────────────────────────────┐
 │ 原版 cleaner 存 [Clean, Noise] 但 dataset 读 [Noise, Clean]。  │
-│ 本版修正为: Tensor[0]=Noise(低剂量条件), Tensor[1]=Clean(目标) │
-│ 与 pet_dataset_trido.py 的期望一致。                            │
+│ v4 格式: Tensor[0]=body_part(uint8→float16),                   │
+│          Tensor[1]=Noise(低剂量条件), Tensor[2]=Clean(目标)     │
+│ body_part: 0=brain(<15%), 1=chest(15-50%), 2=abdomen(>50%)     │
+│ 与 pet_dataset_trido.py 的 [3,H,W] 期望一致。                   │
 └────────────────────────────────────────────────────────────────┘
 
 输出结构:
@@ -25,7 +27,7 @@ v2 文档骨架 + v3 解剖检测 + 目录名驱动剂量发现。
   ├── val/  P0100/...
   └── test/ P0200/...
 
-兼容: pet_dataset_trido.py 直接读取, Tensor[0]=Noise(条件), Tensor[1]=Clean(目标), float16
+兼容: pet_dataset_trido.py 直接读取, Tensor[0]=body_part, [1]=Noise(条件), [2]=Clean(目标), float16
 """
 
 import os
@@ -33,7 +35,6 @@ import random
 import pydicom
 import numpy as np
 import torch
-import re
 from collections import defaultdict
 from tqdm import tqdm
 
@@ -70,6 +71,9 @@ class UDPETCleanerConfig:
         "1-2": 2, "d2": 2, "1_2": 2,
         "1-4": 4, "d4": 4, "1_4": 4,
         "1-10": 10, "d10": 10, "1_10": 10,
+        "1-20": 20, "d20": 20, "1_20": 20,
+        "1-50": 50, "d50": 50, "1_50": 50,
+        "1-100": 100, "d100": 100, "1_100": 100,
     }
 
 
@@ -225,12 +229,14 @@ def center_crop_numpy(img_array, target_size=256):
 def _is_full_dose_dir(dirpath):
     """Check if a directory is a full-dose scan directory by its name.
 
-    Strategy A (Bern-Inselspital): basename contains 'full dose', 'drf_100', '100 dose'
+    Strategy A (Bern-Inselspital): basename contains 'full_dose'/'Full_dose' or 'drf_100'
+       (NOT '100 dose' — that would falsely match '1-100 dose' low-dose dirs)
     Strategy B (Shanghai-Ruijin):  basename contains 'normal' (WB scan protocol)
+       (D2/D4/D10/D100 are LOW-dose, NOT full-dose; only NORMAL marks full-dose)
     """
-    basename_lower = os.path.basename(dirpath).lower()
-    # Bern pattern
-    if "full dose" in basename_lower or "100 dose" in basename_lower or "drf_100" in basename_lower:
+    basename_lower = os.path.basename(dirpath).lower().replace("_", " ")
+    # Bern pattern: "Full_dose" → "full dose", or "drf_100"
+    if "full dose" in basename_lower or "drf_100" in basename_lower:
         return True
     # Shanghai pattern: "2.886 x 600 WB NORMAL"
     if "normal" in basename_lower:
@@ -249,42 +255,20 @@ def _is_dicom_dir(dirpath):
     return False
 
 
-def _parse_wb_param(dirname):
-    """Extract the numeric parameter from a WB scan protocol directory name.
+def _resolve_low_dose_denom(low_dirname):
+    """Determine dose denominator from directory name via DOSE_MAPPING keywords.
 
-    Example: '2.886 x 600 WB NORMAL' → 600, '2.886 x 150 WB NORMAL' → 150
-    Returns None if the name doesn't match the WB pattern.
-    """
-    m = re.match(r"[\d.]+\s*x\s*(\d+)\s*wb", dirname.lower().strip())
-    if m:
-        return int(m.group(1))
-    return None
+    Covers all three naming conventions:
+      Bern:       "1-2_dose" → 2, "1-10_dose" → 10, "1-100_dose" → 100
+      Shanghai 2022: "1-2 dose" → 2, "1-4 dose" → 4  (matches same keywords)
+      Shanghai 2023: "2.886 x 150 WB D4" → 4, "D10" → 10, "D100" → 100
 
-
-def _resolve_low_dose_denom(low_dirname, full_dirname, full_param):
-    """Determine dose denominator for a low-dose directory.
-
-    Strategy A (Bern): DOSE_MAPPING keywords in directory name → explicit denom
-    Strategy B (Shanghai): WB protocol name → ratio of full_param / low_param
     Returns (denom, is_match) — is_match=False means skip this directory.
     """
     dl = low_dirname.lower().strip()
-
-    # Strategy A: Bern-style dose keywords (1-2, d4, 1_10, etc.)
     for keyword, denom in UDPETCleanerConfig.DOSE_MAPPING.items():
         if keyword in dl and "1000" not in dl:
             return denom, True
-
-    # Strategy B: Shanghai-style WB protocol → ratio
-    if full_param is not None:
-        low_param = _parse_wb_param(low_dirname)
-        if low_param is not None and low_param > 0:
-            if full_param > low_param and full_param % low_param == 0:
-                denom = full_param // low_param
-                if denom > 1:
-                    return denom, True
-
-    # Strategy C: universal fallback — directory contains DICOM but no dose info
     return -1, False
 
 
@@ -293,9 +277,9 @@ def discover_patients(root_dirs):
     扫描所有数据源, 构建病人清单。
 
     采用「自上而下」策略:
-      1. Walk 整棵树, 找到所有 full-dose 目录 (名称含 full/normal/drf_100)
+      1. Walk 整棵树, 找到所有 full-dose 目录 (名称含 full_dose/normal/drf_100)
       2. 从父目录(病人级)发现所有低剂量兄弟目录
-      3. 多策略解析剂量分母 (Bern 关键词 + Shanghai WB比值 + 通用回退)
+      3. DOSE_MAPPING 关键词统一解析 (Bern 1-2_dose / Shanghai 2022 1-2 dose / Shanghai 2023 D4)
 
     返回: list of dict {
         patient_dir, patient_id, full_dose_dir,
@@ -327,9 +311,6 @@ def discover_patients(root_dirs):
             if not os.path.isdir(patient_dir):
                 continue
 
-            # 解析 full-dose 的 WB 参数 (Shanghai), 用于后续低剂量比值计算
-            full_wb_param = _parse_wb_param(os.path.basename(full_dose_dir))
-
             # ── 发现所有兄弟目录作为候选剂量目录 ──
             try:
                 siblings = os.listdir(patient_dir)
@@ -342,9 +323,7 @@ def discover_patients(root_dirs):
                 if not os.path.isdir(sib_path) or sib_path == full_dose_dir:
                     continue
 
-                denom, is_low_dose = _resolve_low_dose_denom(
-                    sib, os.path.basename(full_dose_dir), full_wb_param
-                )
+                denom, is_low_dose = _resolve_low_dose_denom(sib)
                 if not is_low_dose:
                     continue
                 low_dose_pairs.append((sib_path, denom))
@@ -358,10 +337,7 @@ def discover_patients(root_dirs):
                         or any(sib_path == lp[0] for lp in low_dose_pairs)):
                     continue
                 if _is_dicom_dir(sib_path):
-                    # 尝试 Bern 关键词
-                    denom, matched = _resolve_low_dose_denom(
-                        sib, os.path.basename(full_dose_dir), full_wb_param
-                    )
+                    denom, matched = _resolve_low_dose_denom(sib)
                     if matched:
                         low_dose_pairs.append((sib_path, denom))
 
@@ -491,10 +467,9 @@ def process_patient(patient, output_base, split_name, config):
       1. Z 降序排列 (头顶=大Z → 脚底=小Z, DICOM HFS 标准)
       2. 热像素检测脑顶 (SUV>2.5, >200px) + 物理回退120mm找回头皮
       3. 0.75面积比截断腹部 (精准卡盆底肌) + 5层骨盆冗余
-      4. Z对齐 full↔low, 输出 float16 .pt 文件
-
-    输出格式: Tensor[0]=Noise(低剂量条件), Tensor[1]=Clean(全剂量目标)
-    与 pet_dataset_trido.py 的读取期望一致。
+      4. Z对齐 full↔low, 按切片在 torso 中的相对位置计算 body_part:
+         i/N < 0.15 → 0(brain), <0.50 → 1(chest), else → 2(abdomen)
+      5. 输出 [3,H,W] float16 .pt: [0]=body_part(uint8→float16), [1]=Noise, [2]=Clean
     """
     full_dir = patient["full_dose_dir"]
     target_size = config.TARGET_SIZE
@@ -586,12 +561,24 @@ def process_patient(patient, output_base, split_name, config):
             target_crop = center_crop_numpy(fpx, target_size)
             cond_crop = low_slices[matched_z]
 
-            # [BUGFIX] 顺序: Tensor[0]=Noise(条件), Tensor[1]=Clean(目标)
-            # 原版 cleaner 存 [Clean, Noise] 但 dataset 读 [Noise, Clean]，此处修正。
+            # ── 构建 [3, H, W] tensor: [body_part, Noise, Clean] ──
+            # body_part 由切片在 torso 中的相对位置决定
+            N = len(torso_full)
+            if i < N * 0.15:
+                body_part = 0   # brain (头顶 ~15%)
+            elif i < N * 0.50:
+                body_part = 1   # chest (15%~50%)
+            else:
+                body_part = 2   # abdomen (50%~脚底)
+
+            bp_tensor = torch.full((1, target_size, target_size),
+                                   body_part, dtype=torch.uint8)
+
             tensor_pair = torch.stack([
-                torch.from_numpy(cond_crop),     # [0] Noise (low-dose condition)
-                torch.from_numpy(target_crop),   # [1] Clean (full-dose target)
-            ]).to(save_dtype)
+                bp_tensor,                       # [0] body_part label
+                torch.from_numpy(cond_crop),     # [1] Noise (low-dose condition)
+                torch.from_numpy(target_crop),   # [2] Clean (full-dose target)
+            ]).to(save_dtype)  # uint8 auto-promotes to float16
 
             save_name = f"{patient['patient_id']}_D{dose_denom}_Z{i:04d}.pt"
             save_path = os.path.join(save_dir, save_name)
@@ -660,7 +647,7 @@ def main():
     print("  · 腹部: 75% 面积比截断 + 5层膀胱冗余")
     print("  · Z轴: 降序 (头顶=大Z), DICOM HFS 标准")
     print("  · 精度: float16 | 分层: 7:1.5:1.5")
-    print("  · 输出: Tensor[0]=Noise, Tensor[1]=Clean (与 dataset 一致)")
+    print("  · 输出: Tensor[0]=body_part, [1]=Noise, [2]=Clean (与 dataset 一致)")
     print("=" * 60)
 
     total_saved = 0
@@ -692,7 +679,7 @@ def main():
 
     print(f"\n[完成] 共保存 {total_saved} 个极致脱水切片 → {config.OUTPUT_DIR}")
     print(f"        精度: {config.SAVE_DTYPE} | 脑部: v3热像素 | 腹部: v3 0.75截断")
-    print(f"        剂量: 目录名驱动 | Tensor: [Noise, Clean]")
+    print(f"        剂量: 目录名驱动 | Tensor: [body_part, Noise, Clean]")
 
 
 if __name__ == "__main__":

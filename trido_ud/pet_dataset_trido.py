@@ -3,10 +3,11 @@ TriDo-JiT Dataset Loader
 =========================
 PET denoising dataset for triple-domain training.
 
-Supports two data formats:
-  1. Image-domain .pt files (from udpet_cleaner.py): [2, H, W] tensors
-     with condition (low-dose) and target (full-dose)
-  2. Sinogram-domain .pt files: with additional sinogram data
+Data format:
+  1. v4 .pt files (from udpet_cleaner_trido.py): [3, H, W] tensors
+     with [0]=body_part, [1]=condition (low-dose), [2]=target (full-dose)
+  2. Legacy .pt files: [2, H, W] tensors with condition + target
+     (body_part inferred from Z-slice position or body_part_map fallback)
 
 The dataset returns (target, condition, body_part) tuples compatible
 with both image-only and triple-domain training.
@@ -23,11 +24,10 @@ from torch.utils.data import Dataset
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Z-slice → body-part 对照表（保留供外部参考，不在 classify 中直接使用）
+#  Z-slice → body-part 对照表（保留供外部参考）
+#  Brain:  Z0000–Z0049  |  Chest:  Z0050–Z0119  |  Abdomen: Z0120–Z0200
+#  ⚠️ v4 .pt 文件自带 body_part 通道 [0,:,:]，此表仅用于 legacy 2 通道 fallback。
 # ═══════════════════════════════════════════════════════════════════
-#  Brain:  Z0000–Z0049
-#  Chest:  Z0050–Z0119
-#  Abdomen: Z0120–Z0200
 
 
 class TriDoPETDataset(Dataset):
@@ -43,26 +43,15 @@ class TriDoPETDataset(Dataset):
     │   └── P0002/
     └── test/
 
-    Each .pt file contains a [2, H, W] tensor:
-      [0]: condition (low-dose image)
-      [1]: target (full-dose / reference image)
-
-    Body part label is inferred from image content (SUV-weighted
-    centroid on the coronal Y-axis).  Can be overridden via body_part_map.
+    Each .pt file contains:
+      - v4 format [3, H, W]: [0]=body_part, [1]=condition (low-dose), [2]=target (full-dose)
+      - legacy format [2, H, W]: [0]=condition, [1]=target (body_part from body_part_map fallback)
 
     Body part categories (for embedding in model):
       0 = brain (脑部)
       1 = chest (胸部)
       2 = abdomen (腹部)
     """
-
-    # ── SUV-based anatomical boundaries ──
-    BRAIN_BOUNDARY = 0.30   # upper 30%  of Y → brain
-    CHEST_BOUNDARY = 0.55   # upper 55%  of Y → chest ends
-
-    # ── Heuristic thresholds ──
-    HEART_SCORE_THRESHOLD   = 4.0   # chest band max/mean ratio
-    BLADDER_SCORE_THRESHOLD = 0.90  # pelvic max / global max
 
     def __init__(self, data_dir, img_size=256, body_part_map=None):
         """
@@ -71,13 +60,14 @@ class TriDoPETDataset(Dataset):
             img_size: Expected image size (None = no resize)
             body_part_map: dict mapping patient_prefix → body_part (0/1/2)
                            or callable(filename) → body_part.
-                           If None, auto-infer from image content.
+                           Only used as fallback when .pt files have 2 channels
+                           (legacy format).  v4 3-channel .pt files read body_part
+                           directly from tensor.
         """
         self.data_dir = data_dir
         self.img_size = img_size
         self.body_part_map = body_part_map
         self.samples = []
-        self._body_part_cache = {}
 
         if not os.path.exists(data_dir):
             raise FileNotFoundError(f"数据路径不存在: {data_dir}")
@@ -115,140 +105,48 @@ class TriDoPETDataset(Dataset):
             return int(match.group(1))
         return None
 
-    # ── Body-part inference (SUV-weighted centroid) ─────────────────
+    # ── Legacy body-part fallback (for 2-channel .pt files only) ─────
 
-    def _infer_body_part_from_image(self, image_tensor, filename=''):
+    def _legacy_body_part(self, filename):
+        """Fallback body_part for legacy 2-channel .pt files.
+
+        Priority:
+          1. body_part_map dict: match patient prefix → 0/1/2
+          2. body_part_map callable: invoke fn(filename) → 0/1/2
+          3. Z-slice heuristics: Z0000-0049→0(brain), Z0050-0119→1(chest), Z0120+→2(abdomen)
         """
-        Infer body part from PET image content (coronal view).
-
-        Primary method: SUV-weighted centroid along the vertical (Y) axis.
-        For coronal slices, Y corresponds to the body's longitudinal axis
-        (head → feet).
-
-        Anatomical region mapping:
-          - Y-centroid in upper 30%       → 0 (brain / 脑部)
-          - Y-centroid in 30%–55% band    → 1 (chest / 胸部)
-          - Y-centroid in lower 45%       → 2 (abdomen / 腹部)
-
-        For ambiguous cases near the chest/abdomen boundary, additional
-        SUV-based heuristics are applied:
-
-          * Heart signature:  focal high-uptake region (myocardium)
-            surrounded by low-uptake lung tissue creates a high max/mean
-            SUV ratio in the chest band — strongly indicative of chest.
-          * Bladder signature: a very bright hot-spot at the extreme
-            bottom of the image (lower 20% of Y) that dominates the
-            global SUV max — strongly indicative of abdomen.
-
-        Args:
-            image_tensor: (1, H, W) PET image (typically target/full-dose)
-            filename: optional, for debug logging
-
-        Returns:
-            body_part: int in {0, 1, 2} — always returns a value
-        """
-        H, W = image_tensor.shape[-2], image_tensor.shape[-1]
-        img = image_tensor.squeeze(0)  # (H, W)
-
-        # Clamp negative values to 0 (SUV floor)
-        img_pos = torch.clamp(img, min=0)
-
-        total_mass = img_pos.sum()
-        if total_mass < 1e-8:
-            return 0  # Empty image → default to brain
-
-        # ── SUV-weighted centroid along Y-axis ──
-        y_idx = torch.arange(H, dtype=torch.float32)
-        vertical_profile = img_pos.sum(dim=1)  # (H,)
-        centroid_y = (vertical_profile * y_idx).sum() / total_mass
-        centroid_norm = centroid_y.item() / H
-
-        # ── Primary classification ──
-        if centroid_norm < self.BRAIN_BOUNDARY:
-            return 0  # brain
-
-        # ── Chest vs abdomen: SUV heuristics for disambiguation ──
-        chest_start = int(H * 0.25)
-        chest_end   = int(H * 0.60)
-        chest_region = img_pos[chest_start:chest_end, :]
-
-        chest_max  = chest_region.max().item()
-        chest_mask = chest_region > 0
-        chest_mean = chest_region[chest_mask].mean().item() if chest_mask.any() else 1e-8
-        heart_score = chest_max / (chest_mean + 1e-8)
-
-        # Bladder signature: how dominant is the brightest pixel in the
-        # pelvic region (lowest 20% of Y)?
-        bladder_start = int(H * 0.80)
-        bladder_region = img_pos[bladder_start:, :]
-        bladder_max = bladder_region.max().item() if bladder_region.numel() > 0 else 0
-        global_max  = img_pos.max().item()
-        bladder_score = bladder_max / (global_max + 1e-8)
-
-        if centroid_norm < self.CHEST_BOUNDARY:
-            # Centroid says chest — confirm with heart signal
-            if heart_score > self.HEART_SCORE_THRESHOLD:
-                return 1   # strong heart → definite chest
-            if bladder_score > 0.95:
-                # Bladder is the global maximum and centroid is borderline;
-                # the bladder may be so bright it pulls the centroid upward.
-                return 2
-            return 1       # default: chest
-        else:
-            # Centroid says abdomen — confirm with bladder signal
-            if bladder_score > self.BLADDER_SCORE_THRESHOLD:
-                return 2   # strong bladder → definite abdomen
-            if heart_score > 6.0:
-                # Exceptionally strong heart signal in lower zone;
-                # possible misalignment — trust the SUV pattern.
-                return 1
-            return 2       # default: abdomen
-
-    # ── Body-part dispatch ─────────────────────────────────────────
-
-    def _get_body_part(self, filename, target_image):
-        """
-        Determine body part label for a sample.
-
-        Priority (first match wins):
-          1. body_part_map dict: match patient prefix → label
-          2. body_part_map callable: invoke fn(filename) → label
-          3. Image-content-based SUV-weighted centroid analysis
-             (always returns a value — this is the terminal method)
-
-        Uses a lazy cache so each file is analyzed only once per worker.
-        """
-        # Check cache first
-        if filename in self._body_part_cache:
-            return self._body_part_cache[filename]
-
-        # ── Priority 1: body_part_map dict ──
+        # Priority 1: body_part_map dict
         if isinstance(self.body_part_map, dict):
             match = re.search(r'(P\d+)', filename)
             if match:
                 patient_id = match.group(1)
                 for prefix, label in self.body_part_map.items():
                     if patient_id.startswith(prefix):
-                        self._body_part_cache[filename] = label
                         return label
 
-        # ── Priority 2: body_part_map callable ──
+        # Priority 2: body_part_map callable
         if callable(self.body_part_map):
-            label = self.body_part_map(filename)
-            self._body_part_cache[filename] = label
-            return label
+            return self.body_part_map(filename)
 
-        # ── Priority 3: image-content-based SUV-weighted centroid
-        #    This is the terminal method — always returns a valid int.
-        label = self._infer_body_part_from_image(target_image, filename)
-        self._body_part_cache[filename] = label
-        return label
+        # Priority 3: Z-slice heuristic
+        z = self._parse_z_slice(filename)
+        if z is not None:
+            if z < 50:
+                return 0   # brain
+            elif z < 120:
+                return 1   # chest
+            else:
+                return 2   # abdomen
+        return 0  # default
 
     # ── Main item access ──────────────────────────────────────────
 
     def __getitem__(self, idx):
         """
         Returns (target_tensor, condition_tensor, body_part_tensor).
+
+        Reads from v4 [3, H, W] format (preferred) or legacy [2, H, W]
+        format with body_part fallback.
 
         On loading errors, skips forward to the next sample with a
         recursion guard to prevent infinite loops on fully corrupted
@@ -268,19 +166,23 @@ class TriDoPETDataset(Dataset):
         filename = os.path.basename(file_path)
 
         try:
-            # Load [2, H, W] tensor pair
+            # Load tensor pair
             tensor_pair = torch.load(file_path, map_location='cpu', weights_only=True)
 
-            # Validate shape: expect [2, H, W]
-            if tensor_pair.ndim != 3 or tensor_pair.shape[0] != 2:
+            # Validate shape: expect [2, H, W] or [3, H, W]
+            if tensor_pair.ndim != 3 or tensor_pair.shape[0] not in (2, 3):
                 raise ValueError(f"Unexpected tensor shape: {tensor_pair.shape}")
 
-            # Extract condition (low-dose) and target (full-dose)
-            condition_tensor = tensor_pair[0:1, :, :]  # (1, H, W)
-            target_tensor = tensor_pair[1:2, :, :]      # (1, H, W)
-
-            # Get body part label
-            body_part = self._get_body_part(filename, target_tensor)
+            if tensor_pair.shape[0] == 3:
+                # ── v4 format [3, H, W] — body_part baked in ──
+                body_part = int(tensor_pair[0, 0, 0].item())
+                condition_tensor = tensor_pair[1:2, :, :].float()  # (1, H, W)
+                target_tensor    = tensor_pair[2:3, :, :].float()  # (1, H, W)
+            else:
+                # ── Legacy format [2, H, W] — body_part from fallback ──
+                condition_tensor = tensor_pair[0:1, :, :].float()  # (1, H, W)
+                target_tensor    = tensor_pair[1:2, :, :].float()  # (1, H, W)
+                body_part = self._legacy_body_part(filename)
 
             # Convert to LongTensor for embedding lookup
             body_part_tensor = torch.tensor(body_part, dtype=torch.long)
