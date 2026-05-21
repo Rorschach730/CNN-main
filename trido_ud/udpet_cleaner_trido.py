@@ -6,12 +6,14 @@ v2 文档骨架 + v3 解剖检测 + 目录名驱动剂量发现。
 核心改进 (vs udpet_cleaner_trido.py):
   1. 剂量发现: 不读 RadionuclideTotalDose（注射剂量不变，减少靠 Poisson 仿真）。
      改用目录名推断剂量比例:
-       Bern:  1-2→denom=2, 1-4→4, 1-10→10, 1-20→20, 1-50→50, 1-100→100, Full_dose→full
-       Shanghai: 2.886 x 600 WB NORMAL→full_param=600, 2.886 x 150 WB D4→denom=600/150=4
+       Bern:  Full_dose→full, 1-2→2, 1-4→4, ..., 1-100→100
+       Shanghai 2022: 与 Bern 相同 (1-2 dose, 1-4 dose, ...)
+       Shanghai 2023: D2/D4/D10/D20/D50/D100 → denom; NORMAL→full
+     统一使用 DOSE_MAPPING 关键词匹配 + 长关键字优先排序
   2. 脑部检测: v3 热像素计数(SUV>2.5, >200px) + 120mm 物理回退
   3. 腹部终止: v3 0.75 面积比阈值 + 5层 pelvic margin
   4. 保持 float16、torch.save 无损压缩、7:1.5:1.5 分层、FDG 过滤
-  5. 新增 _parse_bern_dose_dir / _parse_shanghai_dose_dir 目录名解析器
+  5. body_part 标签: 按切片在 torso 中的相对位置存入 [3,H,W] tensor
 
 ┌─ BUGFIX: Tensor 顺序修正 ─────────────────────────────────────┐
 │ 原版 cleaner 存 [Clean, Noise] 但 dataset 读 [Noise, Clean]。  │
@@ -642,7 +644,7 @@ def main():
     # ── 阶段 3: 处理并保存 ──
     print("\n" + "=" * 60)
     print("[阶段 3] v3解剖检测 — 热像素脑部定位 + 0.75盆底截断...")
-    print("  · 剂量: 目录名推断 (Bern: 1-X, Shanghai: WB参数)")
+    print("  · 剂量: 目录名推断 (Bern: 1-X, Shanghai: D关键词)")
     print("  · 脑部: SUV>2.5 热像素计数 + 120mm 物理回退找回头皮")
     print("  · 腹部: 75% 面积比截断 + 5层膀胱冗余")
     print("  · Z轴: 降序 (头顶=大Z), DICOM HFS 标准")
