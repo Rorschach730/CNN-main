@@ -54,12 +54,12 @@ def get_args_parser():
     parser = argparse.ArgumentParser('TriDo-JiT PET Denoising', add_help=True)
 
     # --- Training ---
-    parser.add_argument('--batch_size', default=16, type=int, help='Batch size per GPU')
-    parser.add_argument('--accum_iter', default=16, type=int, help='Gradient accumulation steps')
-    parser.add_argument('--epochs', default=400, type=int, help='Number of training epochs')
+    parser.add_argument('--batch_size', default=8, type=int, help='Batch size per GPU')
+    parser.add_argument('--accum_iter', default=32, type=int, help='Gradient accumulation steps')
+    parser.add_argument('--epochs', default=200, type=int, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
-    parser.add_argument('--warmup_epochs', type=int, default=20, help='LR warmup epochs')
+    parser.add_argument('--warmup_epochs', type=int, default=10, help='LR warmup epochs')
     parser.add_argument('--min_lr', type=float, default=1e-6, help='Minimum LR')
     parser.add_argument('--lr_schedule', type=str, default='cosine', choices=['cosine', 'constant'])
 
@@ -107,6 +107,9 @@ def get_args_parser():
     # --- Misc ---
     parser.add_argument('--seed', default=42, type=int, help='Random seed')
     parser.add_argument('--noise_scale', default=1.0, type=float, help='Noise scale factor')
+    
+    # --- Virtual Epoch ---
+    parser.add_argument('--virtual_epoch_ratio', default=0.10, type=float, help='Fraction of dataset to use per virtual epoch (e.g., 0.10 = 10%)')
 
     return parser
 
@@ -129,7 +132,8 @@ def main(args):
     print(f"  Batch size:       {args.batch_size}")
     print(f"  Accumulation:     {args.accum_iter}")
     print(f"  Effective batch:  {args.batch_size * args.accum_iter}")
-    print(f"  Epochs:           {args.epochs}")
+    print(f"  Epochs:           {args.epochs} (Virtual)")
+    print(f"  Virtual Ratio:    {args.virtual_epoch_ratio * 100:.1f}%")
     print(f"  Model size:       {args.model_size}")
     print(f"  Sino domain:      {args.use_sino_domain}")
     print(f"  Freq domain:      {args.use_freq_domain}")
@@ -147,7 +151,9 @@ def main(args):
     # --- Dataset ---
     dataset_train = TriDoPETDataset(
         os.path.join(args.data_path, 'train'),
-        img_size=args.img_size
+        img_size=args.img_size,
+        virtual_epoch_ratio=args.virtual_epoch_ratio,
+        seed=args.seed
     )
 
     dataloader_train = torch.utils.data.DataLoader(
@@ -221,6 +227,9 @@ def main(args):
     start_time = time.time()
 
     for epoch in range(start_epoch, args.epochs):
+        # 核心：每个 Virtual Epoch 开始前，让 Dataset 重新抽样一次
+        dataset_train.set_epoch(epoch)
+        
         train_stats = train_one_epoch(
             model, dataloader_train, optimizer, device, epoch, args
         )
