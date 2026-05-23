@@ -6,7 +6,7 @@ for low-dose PET denoising.
 
 Usage:
     # Full triple-domain training
-    python trido_ud/main_trido.py --data_path ./processed_data_udpet --output_dir ./trido_output
+    python trido_ud/main_trido.py --data_path ./processed_data_trido --output_dir ./trido_output
 
     # Image-only (ablation: no sino domain)
     python trido_ud/main_trido.py --no_sino_domain
@@ -54,12 +54,12 @@ def get_args_parser():
     parser = argparse.ArgumentParser('TriDo-JiT PET Denoising', add_help=True)
 
     # --- Training ---
-    parser.add_argument('--batch_size', default=24, type=int, help='Batch size per GPU')
-    parser.add_argument('--accum_iter', default=11, type=int, help='Gradient accumulation steps')
-    parser.add_argument('--epochs', default=200, type=int, help='Number of training epochs')
+    parser.add_argument('--batch_size', default=16, type=int, help='Batch size per GPU')
+    parser.add_argument('--accum_iter', default=16, type=int, help='Gradient accumulation steps')
+    parser.add_argument('--epochs', default=400, type=int, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
-    parser.add_argument('--warmup_epochs', type=int, default=10, help='LR warmup epochs')
+    parser.add_argument('--warmup_epochs', type=int, default=20, help='LR warmup epochs')
     parser.add_argument('--min_lr', type=float, default=1e-6, help='Minimum LR')
     parser.add_argument('--lr_schedule', type=str, default='cosine', choices=['cosine', 'constant'])
 
@@ -255,12 +255,14 @@ def main(args):
 
         # --- Checkpoint saving ---
         is_save_epoch = False
-        if epoch < 100:
+
+        if epoch <= args.epochs - 50:
             if epoch % 50 == 0:
                 is_save_epoch = True
         else:
-            if epoch % 10 == 0:
+            if epoch % 5 == 0:
                 is_save_epoch = True
+
         if epoch == args.epochs - 1:
             is_save_epoch = True
 
