@@ -64,7 +64,7 @@ def get_args_parser():
     parser.add_argument('--lr_schedule', type=str, default='cosine', choices=['cosine', 'constant'])
 
     # --- Architecture ---
-    parser.add_argument('--model_size', default='Base', type=str,
+    parser.add_argument('--model_size', default='Large', type=str,
                         choices=['Large', 'Base', 'Small'],
                         help='TriDo-JiT model size')
     parser.add_argument('--img_size', default=256, type=int, help='Input image size')
@@ -95,7 +95,7 @@ def get_args_parser():
     parser.add_argument('--sino_weight', default=0.01, type=float, help='Sinogram consistency loss weight')
 
     # --- Data ---
-    parser.add_argument('--data_path', default='./processed_data_udpet', type=str,
+    parser.add_argument('--data_path', default='I:/processed_data_trido/', type=str,
                         help='Path to processed PET data')
     parser.add_argument('--output_dir', default='./trido_output', type=str,
                         help='Output directory for checkpoints and logs')
