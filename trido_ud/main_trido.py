@@ -32,6 +32,8 @@ import time
 import torch
 import numpy as np
 from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import random
 

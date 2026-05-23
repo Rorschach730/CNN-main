@@ -46,7 +46,7 @@ class UDPETCleanerConfig:
         "H:/Bern-Inselspital-2022",
         "H:/Shanghai-Ruijin-Hospital-2022",
         "H:/Shanghai-Ruijin-Hospital-2023",
-    ]
+    ]  # 医院数据中心路径（Windows 盘符，部署时需根据实际挂载调整）
     OUTPUT_DIR = "I:/processed_data_trido"
     TARGET_SIZE = 256
 
@@ -194,6 +194,7 @@ def detect_abdomen_end(slices_sorted, body_threshold=0.05, area_ratio=0.75,
     cutoff = max_area * area_ratio
 
     # 从脚底向上扫描：寻找面积突增突破 cutoff 的位置（盆底肌分界线）
+    # ⚠️ head_skip 跳过颈部以上，防止脑部高摄取干扰盆底检测
     for i in range(n - 1, head_skip, -1):
         if areas_smooth[i] > cutoff:
             # 找到盆底后，往下肢方向延伸 margin_slices 层作为安全区
@@ -525,6 +526,10 @@ def process_patient(patient, output_base, split_name, config):
 
     output_count = 0
 
+    # ── 预创建输出目录（与剂量无关，提到循环外）──
+    save_dir = os.path.join(output_base, split_name, patient["patient_id"])
+    os.makedirs(save_dir, exist_ok=True)
+
     # ── 遍历每种低剂量 ──
     for low_dir, dose_denom in patient["low_dose_pairs"]:
         # 加载低剂量切片
@@ -547,9 +552,6 @@ def process_patient(patient, output_base, split_name, config):
             continue
 
         # ── Z 对齐 + 保存 ──
-        save_dir = os.path.join(output_base, split_name, patient["patient_id"])
-        os.makedirs(save_dir, exist_ok=True)
-
         for i, (fz, fpx) in enumerate(torso_full):
             # 找最接近的 Z 坐标 (容差 0.5mm)
             matched_z = min(
@@ -580,7 +582,7 @@ def process_patient(patient, output_base, split_name, config):
                 bp_tensor,                       # [0] body_part label
                 torch.from_numpy(cond_crop),     # [1] Noise (low-dose condition)
                 torch.from_numpy(target_crop),   # [2] Clean (full-dose target)
-            ]).to(save_dtype)  # uint8 auto-promotes to float16
+            ]).to(save_dtype)  # float32 → save_dtype (float16)，非 uint8 自动提升
 
             save_name = f"{patient['patient_id']}_D{dose_denom}_Z{i:04d}.pt"
             save_path = os.path.join(save_dir, save_name)

@@ -154,7 +154,7 @@ class TriDoDenoiser(nn.Module):
         model_input = torch.cat([z, condition_input], dim=1)   # (B, 2, H, W)
 
         # [JiT 核心]: 网络直接预测干净图像 x_pred
-        x_pred = self.net(model_input, t.flatten(), body_part)  # (B, 1, H, W)
+        x_pred = self.net(model_input, t, body_part)  # (B, 1, H, W)
 
         # ── Step 4: x_pred → v_pred 转换 + 加权 Loss ──
         # v_pred = (x_pred - z) / (1-t)，分母 clamp 防除零
@@ -300,25 +300,21 @@ class TriDoDenoiser(nn.Module):
             # Euler 半步预览
             z_tmp = z + v_curr * dt
 
-            if i == steps - 1:
-                # 最后一步: 直接 Euler
-                z = z_tmp
-            else:
-                # ── Heun Step 2: 在 t_next 处求 v_next，取平均 ──
-                t_next_batch = t_next.repeat(bsz)
-                z_tmp_in = torch.cat([z_tmp, z_tmp], dim=0)
-                t_next_in = torch.cat([t_next_batch, t_next_batch], dim=0)
+            # ── Heun Step 2: 在 t_next 处求 v_next，取平均（含最后一步）──
+            t_next_batch = t_next.repeat(bsz)
+            z_tmp_in = torch.cat([z_tmp, z_tmp], dim=0)
+            t_next_in = torch.cat([t_next_batch, t_next_batch], dim=0)
 
-                x_pred_next = self.net(
-                    torch.cat([z_tmp_in, cond_in], dim=1), t_next_in, body_in
-                )
-                denom_next = torch.clamp(1.0 - t_next, min=0.05)
-                v_next_all = (x_pred_next - z_tmp_in) / denom_next
+            x_pred_next = self.net(
+                torch.cat([z_tmp_in, cond_in], dim=1), t_next_in, body_in
+            )
+            denom_next = torch.clamp(1.0 - t_next, min=0.05)
+            v_next_all = (x_pred_next - z_tmp_in) / denom_next
 
-                v_next_cond, v_next_uncond = v_next_all.chunk(2, dim=0)
-                v_next = v_next_uncond + cfg_scale * (v_next_cond - v_next_uncond)
+            v_next_cond, v_next_uncond = v_next_all.chunk(2, dim=0)
+            v_next = v_next_uncond + cfg_scale * (v_next_cond - v_next_uncond)
 
-                # Heun's 平均: z = z + 0.5 * (v_curr + v_next) * dt
-                z = z + 0.5 * (v_curr + v_next) * dt
+            # Heun's 平均: z = z + 0.5 * (v_curr + v_next) * dt
+            z = z + 0.5 * (v_curr + v_next) * dt
 
         return z

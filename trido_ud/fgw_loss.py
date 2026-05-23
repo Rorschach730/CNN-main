@@ -153,6 +153,7 @@ class FGWLoss(nn.Module):
         self.alpha = alpha
         self.reg = reg
         self.feature_weight = feature_weight
+        self._rng = torch.Generator().manual_seed(42)  # 固定种子确保确定性
 
     def extract_patches(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -240,10 +241,12 @@ class FGWLoss(nn.Module):
             # 随机下采样（若 patch 过多）
             if pred_patches.shape[0] > N_patches_max:
                 idx = torch.randperm(pred_patches.shape[0],
+                                     generator=self._rng,
                                      device=pred.device)[:N_patches_max]
                 pred_patches = pred_patches[idx]
             if target_patches.shape[0] > N_patches_max:
                 idx = torch.randperm(target_patches.shape[0],
+                                     generator=self._rng,
                                      device=target.device)[:N_patches_max]
                 target_patches = target_patches[idx]
 

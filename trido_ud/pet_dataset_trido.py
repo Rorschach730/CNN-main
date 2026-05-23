@@ -121,7 +121,7 @@ class TriDoPETDataset(Dataset):
             match = re.search(r'(P\d+)', filename)
             if match:
                 patient_id = match.group(1)
-                for prefix, label in self.body_part_map.items():
+                for prefix, label in sorted(self.body_part_map.items(), key=lambda x: -len(x[0])):
                     if patient_id.startswith(prefix):
                         return label
 

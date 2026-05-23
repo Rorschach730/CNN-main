@@ -30,7 +30,7 @@ class FiLM(nn.Module):
         self.gamma_proj = nn.Linear(condition_dim, n_channels)
         self.beta_proj = nn.Linear(condition_dim, n_channels)
 
-        # Initialize: gamma ≈ 1, beta ≈ 0
+        # Initialize: gamma ≈ 0, beta ≈ 0 (zero-init, FiLM starts as identity)
         nn.init.zeros_(self.gamma_proj.weight)
         nn.init.zeros_(self.gamma_proj.bias)
         nn.init.zeros_(self.beta_proj.weight)
