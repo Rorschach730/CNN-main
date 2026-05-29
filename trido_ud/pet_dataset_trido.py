@@ -29,7 +29,7 @@ class TriDoPETDataset(Dataset):
     PET Denoising Dataset for TriDo-JiT training with Virtual Epoch support.
     """
 
-    def __init__(self, data_dir, img_size=256, body_part_map=None, virtual_epoch_ratio=0.05, seed=42):
+    def __init__(self, data_dir, img_size=256, body_part_map=None, virtual_epoch_ratio=0.10, seed=42):
         """
         Args:
             data_dir: Path to data directory
