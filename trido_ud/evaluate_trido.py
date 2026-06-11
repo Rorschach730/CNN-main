@@ -10,10 +10,7 @@ TriDo-JiT 批量评估脚本 (Full Test Set Evaluation)
   - 输出: PSNR/SSIM/SNR/MSE/SUVmax Bias + 可视化 + ROI .npy
 
 用法:
-    python trido_ud/evaluate_trido.py \
-        --ckpt_path ./trido_output/checkpoint-199.pth \
-        --data_path /path/to/processed_data_trido/test \
-        --output_dir ./eval_results_trido
+    python trido_ud/evaluate_trido_fixed.py
 
 依赖:
     pip install scikit-image tqdm matplotlib numpy torch
@@ -182,6 +179,15 @@ def background_worker(task_queue, result_queue, output_vis_dir, output_npy_dir):
             print(f"[Worker Error] {e}")
 
 
+# 【核心修复】：将 collate_fn 提取到全局作用域，确保 Windows 下多进程可以序列化它
+def collate_fn(batch):
+    """collate: 每个 sample = (target, condition, body_part)"""
+    targets = torch.stack([s[0] for s in batch])
+    conditions = torch.stack([s[1] for s in batch])
+    body_parts = torch.tensor([s[2] for s in batch], dtype=torch.long)
+    return targets, conditions, body_parts
+
+
 # ═══════════════════════════════════════════════════════════════
 # 主评估函数
 # ═══════════════════════════════════════════════════════════════
@@ -200,7 +206,7 @@ def evaluate_trido(args):
     os.makedirs(npy_dir, exist_ok=True)
 
     print(f"╔══════════════════════════════════════════╗")
-    print(f"║   TriDo-JiT 批量评估 (Full Test Set)     ║")
+    print(f"║   TriDo-JiT 批量评估 (Full Test Set)      ║")
     print(f"╚══════════════════════════════════════════╝")
     print(f"  Checkpoint : {args.ckpt_path}")
     print(f"  Test Data  : {args.data_path}")
@@ -215,7 +221,13 @@ def evaluate_trido(args):
     ckpt = torch.load(args.ckpt_path, map_location=device, weights_only=False)
     if 'model_ema' in ckpt:
         print("[*] 加载 EMA 平滑权重")
-        model.load_ema_state_dict(ckpt['model_ema'])
+        try:
+            model.load_ema_state_dict(ckpt['model_ema'])
+            # 【重要】确保将 EMA 参数复制到网络主体
+            model.net.load_state_dict(ckpt['model_ema'], strict=False)
+        except Exception as e:
+            print(f"[!] 加载 EMA 报错，回退到常规权重... Error: {e}")
+            model.net.load_state_dict(ckpt['model'], strict=False)
     elif 'model' in ckpt:
         model.net.load_state_dict(ckpt['model'], strict=False)
         print("[*] 加载常规权重")
@@ -243,17 +255,11 @@ def evaluate_trido(args):
 
     # ── DataLoader ──
     batch_size = min(args.batch_size, total_samples)
-    def collate_fn(batch):
-        """collate: 每个 sample = (target, condition, body_part)"""
-        targets = torch.stack([s[0] for s in batch])
-        conditions = torch.stack([s[1] for s in batch])
-        body_parts = torch.tensor([s[2] for s in batch], dtype=torch.long)
-        return targets, conditions, body_parts
 
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, shuffle=False,
         num_workers=args.num_workers, pin_memory=(device.type == 'cuda'),
-        collate_fn=collate_fn,
+        collate_fn=collate_fn, # 引用全局作用域的 collate_fn
     )
 
     # ── 后台 Worker 进程 ──
@@ -280,7 +286,7 @@ def evaluate_trido(args):
         # ── GPU 推理 ──
         t_gpu_start = time.time()
         with torch.inference_mode(), torch.autocast(
-            device_type=device.type, dtype=torch.float16,
+            device_type=device.type, dtype=torch.bfloat16,
             enabled=(device.type == 'cuda')
         ):
             outputs = model.generate(
@@ -303,11 +309,17 @@ def evaluate_trido(args):
                 sample_idx += 1
                 continue
 
-            file_path = dataset.current_epoch_samples[sample_idx]
-            base_name = os.path.basename(file_path).replace('.pt', '')
-            z_match = re.search(r'_Z(\d{4})', base_name)
-            z_str = z_match.group(1) if z_match else f"{sample_idx:04d}"
-            dose_val = extract_dose_from_name(base_name)
+            # 修改这部分避免 dataset.current_epoch_samples 越界
+            if sample_idx < len(dataset.current_epoch_samples):
+                file_path = dataset.current_epoch_samples[sample_idx]
+                base_name = os.path.basename(file_path).replace('.pt', '')
+                z_match = re.search(r'_Z(\d{4})', base_name)
+                z_str = z_match.group(1) if z_match else f"{sample_idx:04d}"
+                dose_val = extract_dose_from_name(base_name)
+            else:
+                base_name = f"sample_{sample_idx:06d}"
+                z_str = "0000"
+                dose_val = float('nan')
 
             task_queue.put((
                 base_name, z_str, dose_val, int(bp_np[i]),
@@ -369,48 +381,38 @@ def evaluate_trido(args):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 命令行参数
+# 命令行参数 (已硬编码固定参数)
 # ═══════════════════════════════════════════════════════════════
 
-def get_args():
-    parser = argparse.ArgumentParser('TriDo-JiT Evaluation', add_help=True)
-
-    # ── I/O ──
-    parser.add_argument('--ckpt_path', type=str, default='./trido_output/checkpoint-199.pth',
-                        help='Checkpoint path (trained 200 epochs)')
-    parser.add_argument('--data_path', type=str, default='I:/processed_data_trido/test',
-                        help='Test dataset path')
-    parser.add_argument('--output_dir', type=str, default='./eval_results_trido',
-                        help='Output directory for all results')
-
-    # ── Model architecture (must match training) ──
-    parser.add_argument('--model_size', type=str, default='Large',
-                        choices=['Large', 'Base', 'Small'])
-    parser.add_argument('--img_size', type=int, default=256)
-    parser.add_argument('--patch_size', type=int, default=16)
-    parser.add_argument('--attn_dropout', type=float, default=0.0)
-    parser.add_argument('--proj_dropout', type=float, default=0.0)
-    parser.add_argument('--use_sino_domain', action='store_true', default=True)
-    parser.add_argument('--use_freq_domain', action='store_true', default=True)
-
-    # ── Inference ──
-    parser.add_argument('--nfe', type=int, default=50, help='ODE integration steps')
-    parser.add_argument('--cfg_scale', type=float, default=0.6)
-    parser.add_argument('--P_mean', type=float, default=-0.5)
-    parser.add_argument('--P_std', type=float, default=1.2)
-    parser.add_argument('--cond_drop_prob', type=float, default=0.1)
-
-    # ── Data loading ──
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for GPU inference')
-    parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
-    parser.add_argument('--workers', type=int, default=3, help='Post-processing workers')
-
-    # ── Device ──
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-
-    return parser.parse_args()
-
+class DummyArgs:
+    pass
 
 if __name__ == '__main__':
-    args = get_args()
+    args = DummyArgs()
+
+    # ── 强制硬编码你的模型参数 ──
+    args.ckpt_path = './trido_output/checkpoint-final.pth' # 已修改为你日志里展示的名称
+    args.data_path = 'I:/processed_data_trido/test'
+    args.output_dir = './eval_results_trido'
+
+    args.model_size = 'Large'
+    args.use_sino_domain = True
+    args.use_freq_domain = True
+    args.img_size = 256
+    args.patch_size = 16
+    args.attn_dropout = 0.0
+    args.proj_dropout = 0.0
+
+    args.nfe = 50
+    args.cfg_scale = 0.6
+    args.P_mean = -0.5
+    args.P_std = 1.2
+    args.cond_drop_prob = 0.1
+
+    args.batch_size = 16   # GPU推理时的并行度，3090跑32毫无压力
+    args.num_workers = 4   # 读取数据的线程数
+    args.workers = 4       # 后台存图和算指标的进程数
+
+    args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     evaluate_trido(args)
