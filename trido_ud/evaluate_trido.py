@@ -286,13 +286,20 @@ def evaluate_trido(args):
         # ── GPU 推理 ──
         t_gpu_start = time.time()
         with torch.inference_mode(), torch.autocast(
-            device_type=device.type, dtype=torch.bfloat16,
+            device_type=device.type, dtype=torch.float16,
             enabled=(device.type == 'cuda')
         ):
-            outputs = model.generate(
-                conditions, body_parts,
-                steps=args.nfe, cfg_scale=args.cfg_scale
-            )
+            # 自适应推理: 根据噪声水平自动调整 CFG + NFE
+            if hasattr(model, 'generate_adaptive'):
+                outputs = model.generate_adaptive(
+                    conditions, body_parts,
+                    base_steps=args.nfe, base_cfg=args.cfg_scale
+                )
+            else:
+                outputs = model.generate(
+                    conditions, body_parts,
+                    steps=args.nfe, cfg_scale=args.cfg_scale
+                )
         if device.type == 'cuda':
             torch.cuda.synchronize()
         t_gpu = time.time() - t_gpu_start
@@ -391,7 +398,7 @@ if __name__ == '__main__':
     args = DummyArgs()
 
     # ── 强制硬编码你的模型参数 ──
-    args.ckpt_path = './trido_output/checkpoint-final.pth' # 已修改为你日志里展示的名称
+    args.ckpt_path = './trido_output/checkpoint-199.pth'  # 200 epoch 模型
     args.data_path = 'I:/processed_data_trido/test'
     args.output_dir = './eval_results_trido'
 
@@ -409,9 +416,9 @@ if __name__ == '__main__':
     args.P_std = 1.2
     args.cond_drop_prob = 0.1
 
-    args.batch_size = 16   # GPU推理时的并行度，3090跑32毫无压力
-    args.num_workers = 4   # 读取数据的线程数
-    args.workers = 4       # 后台存图和算指标的进程数
+    args.batch_size = 64    # GPU 推理 batch size
+    args.num_workers = 4    # DataLoader 线程数
+    args.workers = 4        # 后台处理进程数
 
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 

@@ -173,13 +173,16 @@ class TriDoDenoiser(nn.Module):
         # 5b. Gram 结构一致性
         loss_struct = self.struct_loss(x_pred, target)
 
-        # 5c. GFP 频域损失（软掩码，与 forward 对齐）
+        # 5c. GFP 频域损失（软掩码 DCT，与 forward 对齐）
         if hasattr(self.net, 'gfp') and self.net.gfp is not None:
             loss_freq = self.net.gfp.compute_frequency_loss(x_pred, target)
         else:
             loss_freq = torch.tensor(0.0, device=device)
 
-        # 5d. Sinogram 一致性损失
+        # 5d. HALO 复合频域损失（全局 FFT + 局部 DWT 双重约束）
+        loss_freq_halo = self._compute_halo_frequency_loss(x_pred, target)
+
+        # 5e. Sinogram 一致性损失
         loss_sino = torch.tensor(0.0, device=device)
         if hasattr(self.net, 'sino_bridge') and self.net.sino_bridge is not None:
             with torch.no_grad():
@@ -192,6 +195,7 @@ class TriDoDenoiser(nn.Module):
             loss_v
             + self.fgw_weight * loss_fgw
             + self.freq_weight * loss_freq
+            + self.freq_weight * 2.0 * loss_freq_halo  # HALO: 2× FFT, 1× DWT
             + self.struct_weight * loss_struct
             + self.sino_weight * loss_sino
         )
@@ -201,6 +205,7 @@ class TriDoDenoiser(nn.Module):
             'v_loss': loss_v.item(),
             'fgw_loss': loss_fgw.item(),
             'freq_loss': loss_freq.item(),
+            'freq_halo_loss': loss_freq_halo.item(),
             'struct_loss': loss_struct.item(),
             'sino_loss': loss_sino.item(),
             'total': total_loss.item(),
@@ -211,6 +216,70 @@ class TriDoDenoiser(nn.Module):
     def get_last_losses(self) -> dict:
         """获取最近一次 forward 的 loss 分解"""
         return getattr(self, '_last_losses', {})
+
+    # ═══════════════════════════════════════════════════════════════
+    # HALO 复合频域损失（全局 FFT + 局部 DWT）
+    # ═══════════════════════════════════════════════════════════════
+
+    def _compute_halo_frequency_loss(self, pred: torch.Tensor,
+                                      target: torch.Tensor) -> torch.Tensor:
+        """
+        HALO-style 复合频域损失:
+          L_freq = 0.2·L_FFT + 0.1·L_DWT
+
+        全局 FFT: 约束全频谱一致性（防止频域坍塌）
+        局部 DWT: 约束多尺度高频子带细节（防止过度平滑）
+
+        权重比 2:1 (FFT:DWT) — 来自 HALO 参数扫描最优结果
+        """
+        # ── 全局 FFT 频谱一致性 ──
+        pred_fft = torch.fft.fft2(pred, norm='ortho')
+        target_fft = torch.fft.fft2(target, norm='ortho')
+        # 幅度谱 + 相位谱 (实部/虚部)
+        loss_fft = F.l1_loss(pred_fft.real, target_fft.real) \
+                 + F.l1_loss(pred_fft.imag, target_fft.imag)
+
+        # ── 局部 DWT 高频子带细节 ──
+        loss_dwt = self._compute_dwt_hf_loss(pred, target)
+
+        return 0.2 * loss_fft + 0.1 * loss_dwt
+
+    def _compute_dwt_hf_loss(self, pred: torch.Tensor,
+                              target: torch.Tensor) -> torch.Tensor:
+        """
+        Haar DWT 两级分解，对 LH/HL/HH 高频子带做 L1 约束。
+
+        DWT 将图像分解为:
+          Level 1: [LL, LH, HL, HH]  (各 H/2 × W/2)
+          Level 2: [LL2, LH2, HL2, HH2]  (各 H/4 × W/4)
+
+        只对高频子带 (LH/HL/HH) 做 L1 loss，不约束低频 LL。
+        """
+        def haar_dwt_2d(x):
+            """Haar 2D DWT: 返回 [LL, LH, HL, HH]"""
+            B, C, H, W = x.shape
+            # Low-pass (平均) 和 High-pass (差分)
+            L = (x[:, :, :, 0::2] + x[:, :, :, 1::2]) / 2.0  # 水平低通
+            H = (x[:, :, :, 0::2] - x[:, :, :, 1::2]) / 2.0  # 水平高通
+            LL = (L[:, :, 0::2, :] + L[:, :, 1::2, :]) / 2.0
+            LH = (L[:, :, 0::2, :] - L[:, :, 1::2, :]) / 2.0
+            HL = (H[:, :, 0::2, :] + H[:, :, 1::2, :]) / 2.0
+            HH = (H[:, :, 0::2, :] - H[:, :, 1::2, :]) / 2.0
+            return LL, LH, HL, HH
+
+        loss = torch.tensor(0.0, device=pred.device)
+
+        for level in range(2):
+            _, LH_p, HL_p, HH_p = haar_dwt_2d(pred)
+            _, LH_t, HL_t, HH_t = haar_dwt_2d(target)
+            loss = loss + F.l1_loss(LH_p, LH_t) \
+                        + F.l1_loss(HL_p, HL_t) \
+                        + F.l1_loss(HH_p, HH_t)
+            # 下一级对 LL 做
+            pred = haar_dwt_2d(pred)[0]
+            target = haar_dwt_2d(target)[0]
+
+        return loss
 
     # ═══════════════════════════════════════════════════════════════
     # EMA 管理
@@ -240,6 +309,66 @@ class TriDoDenoiser(nn.Module):
     # ═══════════════════════════════════════════════════════════════
     # 推理生成（Heun's 2nd-order + CFG）
     # ═══════════════════════════════════════════════════════════════
+
+    @torch.no_grad()
+    def estimate_noise_level(self, condition: torch.Tensor) -> torch.Tensor:
+        """
+        估计输入低剂量图像相对于干净图像的噪声水平。
+        
+        使用 condition 的局部方差作为噪声代理指标。
+        高方差 → 高噪声 → 需要强力去噪 (高 CFG, 多 NFE)
+        低方差 → 低噪声 → 需要保守去噪 (低 CFG, 少 NFE)
+        
+        Returns:
+            noise_level: (B,) 归一化噪声水平 ∈ [0, 1]
+        """
+        B = condition.size(0)
+        # 局部方差 (3×3) 作为噪声估计
+        kernel = torch.ones(1, 1, 3, 3, device=condition.device) / 9.0
+        local_mean = F.conv2d(condition, kernel, padding=1)
+        local_sq_mean = F.conv2d(condition ** 2, kernel, padding=1)
+        local_var = (local_sq_mean - local_mean ** 2).clamp(min=0)
+        
+        # 全局归一化: 每张图的平均局部方差
+        noise_level = local_var.mean(dim=[1, 2, 3])  # (B,)
+        # 经验映射到 [0, 1]: var<1e-6 → 极干净, var>1e-3 → 极噪
+        noise_level = (noise_level / 1e-3).clamp(0, 1)
+        return noise_level
+
+    @torch.no_grad()
+    def generate_adaptive(self, condition: torch.Tensor, body_part: torch.Tensor,
+                          base_steps: int = 50, base_cfg: float = 0.6) -> torch.Tensor:
+        """
+        CFG + NFE 自适应推理。
+        
+        根据输入噪声水平自动调整:
+          - 干净输入 (高剂量) → 降低 CFG, 减少步数
+          - 噪声输入 (低剂量) → 提高 CFG, 增加步数
+        
+        经验映射:
+          noise=0.0 (1/2剂量) → cfg=0.2, nfe=20
+          noise=0.5 (1/10剂量) → cfg=0.6, nfe=50
+          noise=1.0 (1/100剂量) → cfg=1.0, nfe=75
+        """
+        noise_lvl = self.estimate_noise_level(condition)
+        
+        # 逐样本自适应参数
+        adaptive_cfg = base_cfg * (0.3 + 0.7 * noise_lvl)  # [0.3*cfg, 1.0*cfg]
+        adaptive_steps = torch.clamp((base_steps * (0.4 + 0.6 * noise_lvl)).long(), min=15, max=100)
+        
+        B = condition.size(0)
+        outputs = []
+        
+        for i in range(B):
+            cond_i = condition[i:i+1]
+            bp_i = body_part[i:i+1]
+            cfg_i = adaptive_cfg[i].item()
+            steps_i = adaptive_steps[i].item()
+            
+            out_i = self.generate(cond_i, bp_i, steps=steps_i, cfg_scale=cfg_i)
+            outputs.append(out_i)
+        
+        return torch.cat(outputs, dim=0)
 
     @torch.no_grad()
     def generate(self, condition: torch.Tensor, body_part: torch.Tensor,
