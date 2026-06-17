@@ -348,7 +348,7 @@ class DifferentiableFBP(nn.Module):
 
 class SinoImageBridge(nn.Module):
     """
-    Complete sinogram ↔ image bridge for TriDo-JiT.
+    Complete sinogram ↔ image bridge for TriDo-CNN.
     Combines forward Radon + FBP into a single module.
 
     Forward path (training): Image → Sinogram → FBP → Image

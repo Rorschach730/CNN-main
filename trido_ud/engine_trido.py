@@ -1,5 +1,5 @@
 """
-TriDo-JiT Training Engine
+TriDo-CNN Training Engine
 ===========================
 Extended training loop with multi-loss logging and three-domain monitoring.
 
@@ -19,7 +19,7 @@ import util.lr_sched as lr_sched
 
 def train_one_epoch(model, data_loader, optimizer, device, epoch, args):
     """
-    Train TriDo-JiT for one epoch.
+    Train TriDo-CNN for one epoch.
 
     Unpacks (target, condition, body_part) tuples, runs three-domain forward pass,
     and accumulates multi-component loss (Flow Matching + FGW + frequency + structure).

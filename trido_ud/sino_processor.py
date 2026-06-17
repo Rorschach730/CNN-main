@@ -1,5 +1,5 @@
 """
-Sinogram Domain Processor for TriDo-JiT
+Sinogram Domain Processor for TriDo-CNN
 ========================================
 Implements sinogram-domain denoising with body-part conditioning.
 Based on the Cross-Domain Reconstruction approach: processes raw sinogram

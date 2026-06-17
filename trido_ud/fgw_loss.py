@@ -1,5 +1,5 @@
 """
-Fused Gromov-Wasserstein (FGW) Loss v2 for TriDo-JiT
+Fused Gromov-Wasserstein (FGW) Loss v2 for TriDo-CNN
 =====================================================
 融合版：结合 fgw_loss.py 的 L² 展开和 fgw_loss_1.py 的张量方法，
 修复了 v0 中跨维度矩阵乘法的 bug，提供精确且高效的计算。

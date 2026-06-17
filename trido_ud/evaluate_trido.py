@@ -1,5 +1,5 @@
 """
-TriDo-JiT 批量评估脚本 (Full Test Set Evaluation)
+TriDo-CNN 批量评估脚本 (Full Test Set Evaluation)
 ==================================================
 基于 test_evaluation_ud.py 重写，适配 trido_ud 三域架构。
 
@@ -160,7 +160,7 @@ def background_worker(task_queue, result_queue, output_vis_dir, output_npy_dir):
                 axes,
                 [in_raw, out_raw, gt_raw],
                 [f"Low Dose Input\n(Body: {bp_name})",
-                 f"TriDo-JiT Denoised\n(PSNR: {psnr_out:.2f})",
+                 f"TriDo-CNN Denoised\n(PSNR: {psnr_out:.2f})",
                  "Full Dose Target"]
             ):
                 ax.imshow(np.clip(img, 0, vmax), cmap='gray', vmin=vmin, vmax=vmax)
@@ -206,7 +206,7 @@ def evaluate_trido(args):
     os.makedirs(npy_dir, exist_ok=True)
 
     print(f"╔══════════════════════════════════════════╗")
-    print(f"║   TriDo-JiT 批量评估 (Full Test Set)      ║")
+    print(f"║   TriDo-CNN 批量评估 (Full Test Set)      ║")
     print(f"╚══════════════════════════════════════════╝")
     print(f"  Checkpoint : {args.ckpt_path}")
     print(f"  Test Data  : {args.data_path}")

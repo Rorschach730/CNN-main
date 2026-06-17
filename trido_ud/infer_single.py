@@ -1,5 +1,5 @@
 """
-TriDo-JiT 极速单张多域推理 (Single Slice Inference)
+TriDo-CNN 极速单张多域推理 (Single Slice Inference)
 ===================================================
 彻底修复:
 1. 强制调用模型原生的 generate() (Heun + CFG)。
@@ -154,7 +154,7 @@ def main():
     axes[0, 0].set_title(f"Input (Low Dose)\\nPSNR: {cond_psnr:.2f} | SSIM: {cond_ssim:.4f} | NMSE: {cond_nmse:.4f}")
 
     axes[0, 1].imshow(img_pred, cmap='gray', vmin=0, vmax=vmax)
-    axes[0, 1].set_title(f"Denoised (TriDo-JiT)\\nPSNR: {pred_psnr:.2f} | SSIM: {pred_ssim:.4f} | NMSE: {pred_nmse:.4f}", color='green')
+    axes[0, 1].set_title(f"Denoised (TriDo-CNN)\\nPSNR: {pred_psnr:.2f} | SSIM: {pred_ssim:.4f} | NMSE: {pred_nmse:.4f}", color='green')
 
     axes[0, 2].imshow(img_targ, cmap='gray', vmin=0, vmax=vmax)
     axes[0, 2].set_title("Target (Full Dose Image)\\nReference")
@@ -182,7 +182,7 @@ def main():
     ssim_gain = pred_ssim - cond_ssim
     nmse_drop = cond_nmse - pred_nmse
 
-    plt.suptitle(f"TriDo-JiT (Fast Single View) | ID: {idx} | Anatomy: {bp_name}\n"
+    plt.suptitle(f"TriDo-CNN (Fast Single View) | ID: {idx} | Anatomy: {bp_name}\n"
                  f"Improvement: PSNR +{psnr_gain:.2f}dB | SSIM +{ssim_gain:.4f} | NMSE -{nmse_drop:.4f}",
                  fontsize=16, fontweight='bold', y=0.98, color='blue')
 

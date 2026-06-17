@@ -1,5 +1,5 @@
 """
-TriDo-JiT Dataset Loader
+TriDo-CNN Dataset Loader
 =========================
 PET denoising dataset for triple-domain training.
 
@@ -26,7 +26,7 @@ from torch.utils.data import Dataset
 
 class TriDoPETDataset(Dataset):
     """
-    PET Denoising Dataset for TriDo-JiT training with Virtual Epoch support.
+    PET Denoising Dataset for TriDo-CNN training with Virtual Epoch support.
     """
 
     def __init__(self, data_dir, img_size=256, body_part_map=None, virtual_epoch_ratio=0.10, seed=42):

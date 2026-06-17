@@ -1,17 +1,17 @@
 """
-TriDo-JiT Denoiser v2: Flow Matching x-Prediction with Multi-Domain Regularization
+TriDo-CNN Denoiser v3: Flow Matching x-Prediction with Multi-Domain Regularization
 ====================================================================================
-融合版：结合 _trido 和 _trido_1 的最佳实践，严格遵循 JiT 论文的 x-prediction 范式。
+融合版：结合 _trido 和 _trido_1 的最佳实践，严格遵循 Flow Matching 论文的 x-prediction 范式。
 
-核心设计（来自 JiT 论文 "Back to Basics", Li & He, MIT）:
+核心设计（基于 Flow Matching "Back to Basics" 范式, Lipman et al.）:
   - 网络直接预测 x_pred (clean image)，而非噪声或速度场
   - 利用流形假设：干净图像在低维流形上，低容量网络即可胜任
   - Loss: v_pred = (x_pred - z) / clamp(1-t, 0.05)，target = clean - condition
   - v-loss 的隐式加权自然偏好中间时间步，无需显式 weighting fn
 
-三域架构（TriDo）:
+三域架构（TriDo-CNN）:
   ① Sinogram Domain  — Radon→SinoEncoder→FBP，含 body-part FiLM 调节
-  ② Image Domain      — JiT Transformer (patch embed + adaLN + RoPE attention)
+  ② Image Domain      — ResNet U-Net CNN (FiLM 条件注入 + 跳跃连接)
   ③ Frequency Domain  — GFP (DCT→Band Split→自适应增强→IDCT)
 
 辅助损失:
@@ -29,16 +29,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from trido_ud.model_trido import TriDoJiT_models
+    from trido_ud.model_cnn import TriDoCNN_models
     from trido_ud.fgw_loss import FGWLoss, StructuralConsistencyLoss
 except ImportError:
-    from model_trido import TriDoJiT_models
+    from model_cnn import TriDoCNN_models
     from fgw_loss import FGWLoss, StructuralConsistencyLoss
 
 
 class TriDoDenoiser(nn.Module):
     """
-    Flow Matching denoiser for TriDo-JiT (v2 — JiT-aligned x-prediction).
+    Flow Matching denoiser for TriDo-CNN (v3 — CNN-based x-prediction).
 
     Training:
       - Primary: v-prediction Huber loss (x_pred → v_pred 转换)
@@ -58,10 +58,10 @@ class TriDoDenoiser(nn.Module):
 
         self.patch_size = getattr(args, 'patch_size', 16)
         model_size = getattr(args, 'model_size', 'Base')
-        model_key = f'TriDoJiT-{model_size}'
+        model_key = f'TriDoCNN-{model_size}'
 
         # ── 三域主干网络 ──
-        self.net = TriDoJiT_models[model_key](
+        self.net = TriDoCNN_models[model_key](
             input_size=args.img_size,
             patch_size=self.patch_size,
             in_channels=2,

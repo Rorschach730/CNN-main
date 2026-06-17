@@ -1,7 +1,7 @@
 """
-TriDo-JiT Training Script
+TriDo-CNN Training Script
 ===========================
-Main entry point for training the Triple-Domain Joint-in-Time Transformer
+Main entry point for training the Triple-Domain CNN
 for low-dose PET denoising.
 
 Usage:
@@ -51,7 +51,7 @@ import util.misc as misc
 
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('TriDo-JiT PET Denoising', add_help=True)
+    parser = argparse.ArgumentParser('TriDo-CNN PET Denoising', add_help=True)
 
     # --- Training ---
     parser.add_argument('--batch_size', default=8, type=int, help='Batch size per GPU')
@@ -66,7 +66,7 @@ def get_args_parser():
     # --- Architecture ---
     parser.add_argument('--model_size', default='Large', type=str,
                         choices=['Large', 'Base', 'Small'],
-                        help='TriDo-JiT model size')
+                        help='TriDo-CNN model size')
     parser.add_argument('--img_size', default=256, type=int, help='Input image size')
     parser.add_argument('--patch_size', default=16, type=int, help='Patch tokenization size')
     parser.add_argument('--attn_dropout', type=float, default=0.0, help='Attention dropout')
@@ -126,7 +126,7 @@ def set_seed(seed):
 
 def main(args):
     print("=" * 70)
-    print("TriDo-JiT: Triple-Domain Joint-in-Time Transformer")
+    print("TriDo-CNN: Triple-Domain CNN for PET Denoising")
     print("=" * 70)
     print(f"  Device:           {args.device}")
     print(f"  Batch size:       {args.batch_size}")
@@ -217,7 +217,7 @@ def main(args):
         if os.path.exists(log_file_path):
             open(log_file_path, 'w').close()
         with open(log_file_path, 'a') as f:
-            f.write("--- TriDo-JiT Fresh Training ---\n")
+            f.write("--- TriDo-CNN Fresh Training ---\n")
             f.write(f"Model: {args.model_size}, Sino={args.use_sino_domain}, "
                     f"Freq={args.use_freq_domain}\n")
             f.write(f"FGW={args.fgw_weight}, Freq={args.freq_weight}, "
@@ -255,7 +255,7 @@ def main(args):
         plt.yscale('log')
         plt.xlabel('Epochs')
         plt.ylabel('Loss Value (Log Scale)')
-        plt.title(f'TriDo-JiT Training Loss ({args.model_size})')
+        plt.title(f'TriDo-CNN Training Loss ({args.model_size})')
         plt.grid(True, which="both", linestyle='--', alpha=0.6)
         plt.legend()
         plt.tight_layout()

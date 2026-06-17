@@ -1,5 +1,5 @@
 """
-Global Frequency Parsing (GFP) Module v2 for TriDo-JiT
+Global Frequency Parsing (GFP) Module v2 for TriDo-CNN
 =======================================================
 融合版：gfp_module.py 的软掩码对齐 + gfp_module_1.py 的完整文档。
 核心改进：compute_frequency_loss 复用 band_split 的软掩码，梯度完全对齐。

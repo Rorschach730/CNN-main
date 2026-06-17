@@ -1,4 +1,4 @@
-JiT-main
+CNN-main
     -lung_pet_data
         -1.3.6.1.4.1.14519.5.2.1.6655.2359.102135094567836038495711390479
             1-001.dcm
@@ -8,27 +8,51 @@ JiT-main
             1-001.dcm
             1-002.dcm
             ...
+    -trido_ud (三域CNN模块)
+        model_cnn.py          — TriDoCNN: 三域架构（Sinogram + ResNet U-Net + GFP）
+        denoiser_trido.py     — TriDoDenoiser: Flow Matching 训练/推理
+        engine_trido.py       — 训练引擎（AMP + 梯度累加）
+        main_trido.py         — 主训练入口
+        sino_processor.py     — Sinogram 编码器（FiLM 条件调节）
+        radon_transform.py    — 可微分 Radon/FBP 变换
+        gfp_module.py         — GFP DCT 频域增强模块
+        fgw_loss.py           — FGW 结构损失 + Gram 一致性
+        pet_dataset_trido.py  — 三域 PET 数据集加载器
+        evaluate_trido.py     — 全测试集评估
+        infer_single.py       — 单张推理
+        infer_and_view.py     — 推理+可视化
+        pt_to_nii.py          — .pt → .nii 转换
+        body_part_classifier.py — 身体部位分类器
     -util
         crop.py
-        lr-sched.py
+        lr_sched.py
         misc.py
         model_util.py
         check.py
-        prepare_data.py
-    -processed_data
+        prepare_data_sinogram.py
+        prepare_data_sinogram_new.py
+        prepare_data_3d.py
+        pet_dataset.py
+        pet_dataset_ud.py
+        udpet_cleaner.py
+        fast_dicom_scanner.py
+    -processed_data_trido
         -test
-            Lung_Dx-A0165_F_222.0MBq_Body.npy
-            Lung_Dx-A0169_F_367.4MBq_Body.npy
+            Patient_001.pt
+            Patient_002.pt
             ...
         -train
-            Lung_Dx-A0164_F_297.9MBq_Body.npy
-            Lung_Dx-A0166_F_290.1MBq_Body.npy
+            Patient_003.pt
+            Patient_004.pt
             ...
         -val
-            Lung_Dx-A0173_M_351.5MBq_Body.npy
-            Lung_Dx-A0182_M_337.1MBq_Body.npy
+            Patient_010.pt
+            Patient_011.pt
             ...
-    denoiser.py
-    engine_jit.py
-    main_jit.py
-    prepare_ref.py
+    model_jit.py              — 原 JiT 模型（保留作参考）
+    model_jit_ud.py           — 原 JiT UD 模型（保留作参考）
+    denoiser.py               — 基础去噪器
+    engine_jit.py             — JiT 训练引擎（保留作参考）
+    main_jit.py / main_ud.py  — 原训练入口（保留作参考）
+    test_evaluation*.py       — 评估工具集
+    README.md

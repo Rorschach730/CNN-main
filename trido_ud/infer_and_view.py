@@ -1,5 +1,5 @@
 """
-TriDo-JiT 推理与多域可视化脚本 (Inference & Multi-Domain Visualization)
+TriDo-CNN 推理与多域可视化脚本 (Inference & Multi-Domain Visualization)
 ====================================================================
 此脚本生成 3x3 对比图，全面展示模型在 图像域、频域(Fourier) 和 弦图域(Sinogram) 的表现。
 """
@@ -128,7 +128,7 @@ def main():
         axes[0, 0].imshow(img_cond, cmap='gray', vmin=0, vmax=vmax)
         axes[0, 0].set_title(f"Low Dose Input (Image)", fontsize=16)
         axes[0, 1].imshow(img_pred, cmap='gray', vmin=0, vmax=vmax)
-        axes[0, 1].set_title(f"TriDo-JiT Denoised (Image)", fontsize=16, color='green')
+        axes[0, 1].set_title(f"TriDo-CNN Denoised (Image)", fontsize=16, color='green')
         axes[0, 2].imshow(img_targ, cmap='gray', vmin=0, vmax=vmax)
         axes[0, 2].set_title(f"Full Dose Target (Image)", fontsize=16)
 
@@ -162,7 +162,7 @@ def main():
         for ax in axes.flatten(): ax.axis('off')
 
         bp_name = {0: "Brain", 1: "Chest", 2: "Abdomen"}.get(body_part.item(), "Unknown")
-        plt.suptitle(f"TriDo-JiT Multi-Domain Inference | Slice ID: {idx} | Anatomy: {bp_name}", fontsize=20, fontweight='bold', y=0.98)
+        plt.suptitle(f"TriDo-CNN Multi-Domain Inference | Slice ID: {idx} | Anatomy: {bp_name}", fontsize=20, fontweight='bold', y=0.98)
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         save_file = os.path.join(args.output_dir, f"result_multidomain_{idx}.png")
