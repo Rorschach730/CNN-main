@@ -565,6 +565,20 @@ def process_patient(patient, output_base, split_name, config):
             target_crop = center_crop_numpy(fpx, target_size)
             cond_crop = low_slices[matched_z]
 
+            # ── 🔧 SUV 百分位裁剪: 防止极端热像素 (膀胱 SUV=70+) 导致
+            #    后续 patch embedding 尺度失控 → 网格伪影
+            #    99.5% percentile: 256×256≈65k像素, 裁剪~327个极端值
+            #    (膀胱热区通常100-500像素, 99.9%仅裁65个不够)
+            SUV_CLIP_PERCENTILE = 99.5
+            pos_mask = target_crop > 0
+            vmax_t = np.percentile(target_crop[pos_mask], SUV_CLIP_PERCENTILE) if pos_mask.any() else 1.0
+            pos_mask_c = cond_crop > 0
+            vmax_c = np.percentile(cond_crop[pos_mask_c], SUV_CLIP_PERCENTILE) if pos_mask_c.any() else 1.0
+            vmax = max(vmax_t, vmax_c)
+
+            target_crop = np.clip(target_crop, 0, vmax)
+            cond_crop = np.clip(cond_crop, 0, vmax)
+
             # ── 构建 [3, H, W] tensor: [body_part, Noise, Clean] ──
             # body_part 由切片在 torso 中的相对位置决定
             N = len(torso_full)

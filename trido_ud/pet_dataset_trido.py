@@ -21,6 +21,7 @@ import os
 import re
 import random
 import torch
+import numpy as np
 from torch.utils.data import Dataset
 
 
@@ -148,6 +149,20 @@ class TriDoPETDataset(Dataset):
                 body_part = self._legacy_body_part(filename)
 
             body_part_tensor = torch.tensor(body_part, dtype=torch.long)
+
+            # ── 🔧 加载时百分位裁剪: 兼容旧预处理数据中的极端 SUV 热像素 ──
+            #    新数据已由 udpet_cleaner_trido.py 裁剪 (99.5%ile), 此处作为安全兜底
+            SUV_CLIP_PERCENTILE = 99.5
+            def _clip_percentile(t, p=SUV_CLIP_PERCENTILE):
+                pos = t[t > 0]
+                if pos.numel() == 0:
+                    return t
+                vmax = np.percentile(pos.numpy(), p)
+                if vmax > 0:
+                    t = t.clamp(0, vmax)
+                return t
+            condition_tensor = _clip_percentile(condition_tensor)
+            target_tensor = _clip_percentile(target_tensor)
 
             if self.img_size is not None:
                 _, H, W = target_tensor.shape
