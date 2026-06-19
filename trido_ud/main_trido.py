@@ -64,7 +64,7 @@ def get_args_parser():
     parser.add_argument('--lr_schedule', type=str, default='cosine', choices=['cosine', 'constant'])
 
     # --- Architecture ---
-    parser.add_argument('--model_size', default='Large', type=str,
+    parser.add_argument('--model_size', default='Base', type=str,
                         choices=['Large', 'Base', 'Small'],
                         help='TriDo-CNN model size')
     parser.add_argument('--img_size', default=256, type=int, help='Input image size')
