@@ -68,7 +68,7 @@ class TriDoDenoiser(nn.Module):
             out_channels=1,
             attn_drop=args.attn_dropout,
             proj_drop=args.proj_dropout,
-            n_views=getattr(args, 'n_views', 180),
+            n_views=getattr(args, 'n_views', 128),
             use_sino_domain=getattr(args, 'use_sino_domain', True),
             use_freq_domain=getattr(args, 'use_freq_domain', True),
         )

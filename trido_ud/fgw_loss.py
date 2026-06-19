@@ -252,7 +252,7 @@ class FGWLoss(nn.Module):
             C_fgw = self.compute_cost_matrix(pred_patches, target_patches)
 
             # Sinkhorn 求解最优传输
-            pi = sinkhorn(C_fgw, reg=self.reg, max_iter=30)
+            pi = sinkhorn(C_fgw, reg=self.reg, max_iter=15)  # 15 次足够收敛, 30 过度
 
             # FGW 距离 = <C_fgw, π>
             fgw_dist = (C_fgw * pi).sum()

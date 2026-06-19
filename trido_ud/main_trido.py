@@ -74,8 +74,8 @@ def get_args_parser():
     parser.add_argument('--proj_dropout', type=float, default=0.0, help='Projection dropout')
 
     # --- Domain control ---
-    parser.add_argument('--n_views', default=180, type=int,
-                        help='Radon projection views (180 is PET standard, 256 was overkill)')
+    parser.add_argument('--n_views', default=128, type=int,
+                        help='Radon projection views (128 is PET standard; lower=faster)')
     parser.add_argument('--use_sino_domain', action='store_true', default=True,
                         help='Enable sinogram domain processing')
     parser.add_argument('--no_sino_domain', action='store_false', dest='use_sino_domain',
