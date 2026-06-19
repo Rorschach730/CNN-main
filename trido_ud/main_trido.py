@@ -54,8 +54,8 @@ def get_args_parser():
     parser = argparse.ArgumentParser('TriDo-CNN PET Denoising', add_help=True)
 
     # --- Training ---
-    parser.add_argument('--batch_size', default=8, type=int, help='Batch size per GPU')
-    parser.add_argument('--accum_iter', default=8, type=int, help='Gradient accumulation steps')
+    parser.add_argument('--batch_size', default=16, type=int, help='Batch size per GPU')
+    parser.add_argument('--accum_iter', default=4, type=int, help='Gradient accumulation steps')
     parser.add_argument('--epochs', default=200, type=int, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
@@ -68,7 +68,8 @@ def get_args_parser():
                         choices=['Large', 'Base', 'Small'],
                         help='TriDo-CNN model size')
     parser.add_argument('--img_size', default=256, type=int, help='Input image size')
-    parser.add_argument('--patch_size', default=64, type=int, help='Patch tokenization size')
+    parser.add_argument('--patch_size', default=64, type=int,
+                        help='[JiT legacy] Patch size (unused in CNN mode, kept for API compat)')
     parser.add_argument('--attn_dropout', type=float, default=0.0, help='Attention dropout')
     parser.add_argument('--proj_dropout', type=float, default=0.0, help='Projection dropout')
 
@@ -104,8 +105,8 @@ def get_args_parser():
                         help='Output directory for checkpoints and logs')
     parser.add_argument('--device', default='cuda', help='Device (cuda/mps/cpu)')
     parser.add_argument('--resume', default='', help='Resume checkpoint path')
-    parser.add_argument('--num_workers', default=4, type=int, help='DataLoader workers')
-    parser.add_argument('--prefetch_factor', default=4, type=int, help='DataLoader prefetch')
+    parser.add_argument('--num_workers', default=8, type=int, help='DataLoader workers')
+    parser.add_argument('--prefetch_factor', default=6, type=int, help='DataLoader prefetch')
 
     # --- Misc ---
     parser.add_argument('--seed', default=42, type=int, help='Random seed')
