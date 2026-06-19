@@ -104,6 +104,10 @@ class TriDoDenoiser(nn.Module):
         # ── 最近一次 loss 分解 ──
         self._last_losses = {}
 
+        # ── HALO 频率控制 ──
+        self._step_counter = 0
+        self.halo_freq = getattr(args, 'halo_freq', 4)  # 每 4 步算一次 HALO
+
     # ═══════════════════════════════════════════════════════════════
     # 时间步采样
     # ═══════════════════════════════════════════════════════════════
@@ -180,8 +184,12 @@ class TriDoDenoiser(nn.Module):
         else:
             loss_freq = torch.tensor(0.0, device=device)
 
-        # 5d. HALO 复合频域损失（全局 FFT + 局部 DWT 双重约束）
-        loss_freq_halo = self._compute_halo_frequency_loss(x_pred, target)
+        # 5d. HALO 复合频域损失（每 halo_freq 步计算一次，弱正则项无需每步求）
+        self._step_counter += 1
+        if self._step_counter % self.halo_freq == 0:
+            loss_freq_halo = self._compute_halo_frequency_loss(x_pred, target)
+        else:
+            loss_freq_halo = torch.tensor(0.0, device=device)
 
         # 5e. Sinogram 一致性损失（仅当权重 > 0 且 sino 域启用时计算）
         loss_sino = torch.tensor(0.0, device=device)

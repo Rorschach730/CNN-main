@@ -54,8 +54,8 @@ def get_args_parser():
     parser = argparse.ArgumentParser('TriDo-CNN PET Denoising', add_help=True)
 
     # --- Training ---
-    parser.add_argument('--batch_size', default=16, type=int, help='Batch size per GPU')
-    parser.add_argument('--accum_iter', default=4, type=int, help='Gradient accumulation steps')
+    parser.add_argument('--batch_size', default=48, type=int, help='Batch size per GPU')
+    parser.add_argument('--accum_iter', default=2, type=int, help='Gradient accumulation steps')
     parser.add_argument('--epochs', default=200, type=int, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
@@ -74,8 +74,8 @@ def get_args_parser():
     parser.add_argument('--proj_dropout', type=float, default=0.0, help='Projection dropout')
 
     # --- Domain control ---
-    parser.add_argument('--n_views', default=128, type=int,
-                        help='Radon projection views (128 is PET standard; lower=faster)')
+    parser.add_argument('--n_views', default=96, type=int,
+                        help='Radon projection views (96=faster, 128=standard)')
     parser.add_argument('--use_sino_domain', action='store_true', default=True,
                         help='Enable sinogram domain processing')
     parser.add_argument('--no_sino_domain', action='store_false', dest='use_sino_domain',
@@ -95,6 +95,8 @@ def get_args_parser():
     parser.add_argument('--fgw_weight', default=0.01, type=float, help='FGW structural loss weight')
     parser.add_argument('--freq_weight', default=0.005, type=float, help='Frequency loss weight')
     parser.add_argument('--struct_weight', default=0.01, type=float, help='Structural consistency loss weight')
+    parser.add_argument('--halo_freq', default=4, type=int,
+                        help='HALO loss compute every N steps (4=25%, 1=every step)')
     parser.add_argument('--sino_weight', default=0.0, type=float,
                         help='Sinogram consistency loss weight (0=disabled, saves ~25% training time)')
 
