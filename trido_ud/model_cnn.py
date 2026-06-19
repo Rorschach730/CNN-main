@@ -322,7 +322,7 @@ class TriDoCNN(nn.Module):
                  hidden_size=768, depth=12, num_heads=12, mlp_ratio=4.0,
                  attn_drop=0.0, proj_drop=0.0, bottleneck_dim=128,
                  base_ch=64, num_res_blocks=2,
-                 n_views=256, sino_base_ch=32,
+                 n_views=180, sino_base_ch=32,
                  use_sino_domain=True, use_freq_domain=True):
         super().__init__()
         self.in_channels = in_channels

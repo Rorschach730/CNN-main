@@ -68,6 +68,7 @@ class TriDoDenoiser(nn.Module):
             out_channels=1,
             attn_drop=args.attn_dropout,
             proj_drop=args.proj_dropout,
+            n_views=getattr(args, 'n_views', 180),
             use_sino_domain=getattr(args, 'use_sino_domain', True),
             use_freq_domain=getattr(args, 'use_freq_domain', True),
         )
@@ -83,7 +84,7 @@ class TriDoDenoiser(nn.Module):
         # ── Loss 权重 ──
         self.fgw_weight = getattr(args, 'fgw_weight', 0.01)
         self.freq_weight = getattr(args, 'freq_weight', 0.005)
-        self.sino_weight = getattr(args, 'sino_weight', 0.01)
+        self.sino_weight = getattr(args, 'sino_weight', 0.0)  # 默认关闭：模型内已有 sino 域处理
         self.struct_weight = getattr(args, 'struct_weight', 0.01)
 
         # ── FGW 结构损失（基于 patch 的高效 FGW）──
@@ -182,9 +183,9 @@ class TriDoDenoiser(nn.Module):
         # 5d. HALO 复合频域损失（全局 FFT + 局部 DWT 双重约束）
         loss_freq_halo = self._compute_halo_frequency_loss(x_pred, target)
 
-        # 5e. Sinogram 一致性损失
+        # 5e. Sinogram 一致性损失（仅当权重 > 0 且 sino 域启用时计算）
         loss_sino = torch.tensor(0.0, device=device)
-        if hasattr(self.net, 'sino_bridge') and self.net.sino_bridge is not None:
+        if self.sino_weight > 0 and hasattr(self.net, 'sino_bridge') and self.net.sino_bridge is not None:
             with torch.no_grad():
                 sino_target = self.net.sino_bridge.forward_project(target)
             sino_pred = self.net.sino_bridge.forward_project(x_pred)

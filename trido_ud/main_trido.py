@@ -73,6 +73,8 @@ def get_args_parser():
     parser.add_argument('--proj_dropout', type=float, default=0.0, help='Projection dropout')
 
     # --- Domain control ---
+    parser.add_argument('--n_views', default=180, type=int,
+                        help='Radon projection views (180 is PET standard, 256 was overkill)')
     parser.add_argument('--use_sino_domain', action='store_true', default=True,
                         help='Enable sinogram domain processing')
     parser.add_argument('--no_sino_domain', action='store_false', dest='use_sino_domain',
@@ -92,7 +94,8 @@ def get_args_parser():
     parser.add_argument('--fgw_weight', default=0.01, type=float, help='FGW structural loss weight')
     parser.add_argument('--freq_weight', default=0.005, type=float, help='Frequency loss weight')
     parser.add_argument('--struct_weight', default=0.01, type=float, help='Structural consistency loss weight')
-    parser.add_argument('--sino_weight', default=0.01, type=float, help='Sinogram consistency loss weight')
+    parser.add_argument('--sino_weight', default=0.0, type=float,
+                        help='Sinogram consistency loss weight (0=disabled, saves ~25% training time)')
 
     # --- Data ---
     parser.add_argument('--data_path', default='E:/processed_data_trido/', type=str,
