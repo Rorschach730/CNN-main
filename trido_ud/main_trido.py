@@ -55,7 +55,7 @@ def get_args_parser():
 
     # --- Training ---
     parser.add_argument('--batch_size', default=8, type=int, help='Batch size per GPU')
-    parser.add_argument('--accum_iter', default=32, type=int, help='Gradient accumulation steps')
+    parser.add_argument('--accum_iter', default=8, type=int, help='Gradient accumulation steps')
     parser.add_argument('--epochs', default=200, type=int, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
@@ -68,7 +68,7 @@ def get_args_parser():
                         choices=['Large', 'Base', 'Small'],
                         help='TriDo-CNN model size')
     parser.add_argument('--img_size', default=256, type=int, help='Input image size')
-    parser.add_argument('--patch_size', default=16, type=int, help='Patch tokenization size')
+    parser.add_argument('--patch_size', default=64, type=int, help='Patch tokenization size')
     parser.add_argument('--attn_dropout', type=float, default=0.0, help='Attention dropout')
     parser.add_argument('--proj_dropout', type=float, default=0.0, help='Projection dropout')
 
@@ -95,7 +95,7 @@ def get_args_parser():
     parser.add_argument('--sino_weight', default=0.01, type=float, help='Sinogram consistency loss weight')
 
     # --- Data ---
-    parser.add_argument('--data_path', default='I:/processed_data_trido/', type=str,
+    parser.add_argument('--data_path', default='E:/processed_data_trido/', type=str,
                         help='Path to processed PET data')
     parser.add_argument('--output_dir', default='./trido_output', type=str,
                         help='Output directory for checkpoints and logs')

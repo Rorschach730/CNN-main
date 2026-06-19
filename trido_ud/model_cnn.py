@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
+from torch.utils.checkpoint import checkpoint
 
 # ==============================================================================
 # Timestep Embedding (kept for Flow Matching conditioning)
@@ -127,23 +127,24 @@ class ResBlock(nn.Module):
 
 
 class DownBlock(nn.Module):
-    """Resolution halving: ResBlock → 3×3 Conv stride-2."""
-
+    """Resolution halving: 升维 → ResBlocks → 下采样 (stride=2)"""
     def __init__(self, in_ch: int, out_ch: int, cond_dim: int,
                  num_res_blocks: int = 2, dropout: float = 0.0):
         super().__init__()
+        # 先升维到 out_ch（替代原来第一个 ResBlock 使用 in_ch）
+        self.conv_in = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False)
+        # 所有 ResBlock 均使用 out_ch 通道
         self.res_blocks = nn.ModuleList([
-            ResBlock(in_ch if i == 0 else out_ch, cond_dim, dropout)
-            for i in range(num_res_blocks)
+            ResBlock(out_ch, cond_dim, dropout) for _ in range(num_res_blocks)
         ])
-        self.downsample = nn.Conv2d(
-            out_ch, out_ch, kernel_size=3, stride=2, padding=1, bias=False
-        )
+        # 下采样（stride=2，保持通道数不变）
+        self.downsample = nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1, bias=False)
 
-    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> tuple:
+    def forward(self, x, cond):
+        x = self.conv_in(x)
         for block in self.res_blocks:
-            x = block(x, cond)
-        skip = x  # Save for skip connection
+            x = checkpoint(block, x, cond, use_reentrant=False)
+        skip = x
         x = self.downsample(x)
         return x, skip
 
@@ -161,16 +162,14 @@ class UpBlock(nn.Module):
             ResBlock(out_ch, cond_dim, dropout) for _ in range(num_res_blocks)
         ])
 
-    def forward(self, x: torch.Tensor, skip: torch.Tensor,
-                cond: torch.Tensor) -> torch.Tensor:
+    def forward(self, x, skip, cond):
         x = self.upsample(x)
-        # Handle size mismatch (e.g., odd dimensions)
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=True)
         x = torch.cat([x, skip], dim=1)
         x = self.conv_in(x)
         for block in self.res_blocks:
-            x = block(x, cond)
+            x = checkpoint(block, x, cond, use_reentrant=False)
         return x
 
 
@@ -212,7 +211,7 @@ class ResNetUNet(nn.Module):
         chs = [base_ch]
         in_ch = base_ch
         self.down_blocks = nn.ModuleList([])
-        for i, mult in enumerate(channel_mult):
+        for mult in channel_mult:
             out_ch = base_ch * mult
             self.down_blocks.append(
                 DownBlock(in_ch, out_ch, cond_dim, num_res_blocks, dropout)
@@ -227,16 +226,20 @@ class ResNetUNet(nn.Module):
             for _ in range(num_res_blocks)
         ])
 
-        # --- Decoder ---
-        # Reverse channel list (excluding bottleneck, including initial)
-        # Bottleneck → mult[-1]*base → ... → base
-        decoder_chs = list(reversed(chs[:-1]))  # Exclude bottleneck from skips
+        # --- Decoder (修正部分) ---
+        # 所有 encoder skip 的通道（从第一个 down block 到最后一个）
+        encoder_skip_chs = chs[1:]   # 例如 [128, 256, 512, 1024] (取决于 base_ch)
+        decoder_chs = list(reversed(encoder_skip_chs))  # 从深到浅
 
         self.up_blocks = nn.ModuleList([])
         for i in range(len(channel_mult)):
-            skip_ch = decoder_chs[i] if i < len(decoder_chs) else base_ch
-            out_ch = base_ch * channel_mult[-(i + 2)] if i < len(channel_mult) - 1 else base_ch
-            in_ch_up = in_ch  # from previous layer
+            skip_ch = decoder_chs[i]
+            # 输出通道：逐渐降回 base_ch
+            if i < len(channel_mult) - 1:
+                out_ch = base_ch * channel_mult[-(i + 2)]
+            else:
+                out_ch = base_ch
+            in_ch_up = in_ch  # 来自上一层的通道
             if i == 0:
                 in_ch_up = bottleneck_ch
             self.up_blocks.append(
@@ -248,34 +251,17 @@ class ResNetUNet(nn.Module):
         self.norm_out = nn.GroupNorm(min(8, base_ch), base_ch)
         self.conv_out = nn.Conv2d(base_ch, out_channels, kernel_size=3, padding=1)
 
-    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, 2, H, W) — concatenated noisy image + condition
-            cond: (B, cond_dim) — time + body_part conditioning embedding
-
-        Returns:
-            output: (B, 1, H, W) — predicted clean image
-        """
-        # Initial
+    def forward(self, x, cond):
         x = self.conv_in(x)
-
-        # Encoder
         skips = []
         for down in self.down_blocks:
             x, skip = down(x, cond)
             skips.append(skip)
-
-        # Bottleneck
         for block in self.bottleneck:
-            x = block(x, cond)
-
-        # Decoder
+            x = checkpoint(block, x, cond, use_reentrant=False)
         for i, up in enumerate(self.up_blocks):
             skip = skips[-(i + 1)]
             x = up(x, skip, cond)
-
-        # Output
         x = self.norm_out(x)
         x = F.silu(x)
         x = self.conv_out(x)

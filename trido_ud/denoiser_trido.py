@@ -222,22 +222,20 @@ class TriDoDenoiser(nn.Module):
     # ═══════════════════════════════════════════════════════════════
 
     def _compute_halo_frequency_loss(self, pred: torch.Tensor,
-                                      target: torch.Tensor) -> torch.Tensor:
+                                     target: torch.Tensor) -> torch.Tensor:
         """
         HALO-style 复合频域损失:
           L_freq = 0.2·L_FFT + 0.1·L_DWT
-
-        全局 FFT: 约束全频谱一致性（防止频域坍塌）
-        局部 DWT: 约束多尺度高频子带细节（防止过度平滑）
-
-        权重比 2:1 (FFT:DWT) — 来自 HALO 参数扫描最优结果
         """
+        # 强制转换为 float32，因为 FFT 不支持 bfloat16
+        pred = pred.float()
+        target = target.float()
+
         # ── 全局 FFT 频谱一致性 ──
         pred_fft = torch.fft.fft2(pred, norm='ortho')
         target_fft = torch.fft.fft2(target, norm='ortho')
-        # 幅度谱 + 相位谱 (实部/虚部)
         loss_fft = F.l1_loss(pred_fft.real, target_fft.real) \
-                 + F.l1_loss(pred_fft.imag, target_fft.imag)
+                   + F.l1_loss(pred_fft.imag, target_fft.imag)
 
         # ── 局部 DWT 高频子带细节 ──
         loss_dwt = self._compute_dwt_hf_loss(pred, target)
