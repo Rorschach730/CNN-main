@@ -1,7 +1,8 @@
 """
 Simple Training Engine
 ======================
-极简训练循环：前馈 → L1 loss → 反向传播。无 AMP、无梯度累加（batch 大了不需要）。
+极简训练循环：前馈 → L1 loss → 反向传播。
+v1.1: bf16 AMP 支持 (降显存 ~50%)
 """
 
 import math
@@ -32,7 +33,8 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, args):
         targets = targets.to(device, non_blocking=True)
         conditions = conditions.to(device, non_blocking=True)
 
-        loss = model(conditions, targets)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            loss = model(conditions, targets)
 
         if not math.isfinite(loss.item()):
             print(f"Loss is {loss.item()}, stopping training")

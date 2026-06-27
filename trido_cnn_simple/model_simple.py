@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from torch.utils.checkpoint import checkpoint
 
 # 复用 sino bridge（网格已缓存版）
 import sys, os
@@ -98,13 +99,15 @@ class ResNetDenoiser(nn.Module):
     图像域直接去噪 ResNet（替代 Flow Matching 扩散）。
     输入: (B, 2, H, W) — concat(condition, image_from_sino) 或 concat(condition, condition)
     输出: (B, 1, H, W) — 干净图像
+    
+    使用 gradient checkpoint 控制显存 (12 blocks × 256² 全分辨率)。
     """
 
     def __init__(self, in_channels: int = 2, out_channels: int = 1,
                  base_ch: int = 64, n_blocks: int = 12):
         super().__init__()
         self.conv_in = nn.Conv2d(in_channels, base_ch, 3, padding=1, bias=False)
-        self.blocks = nn.Sequential(*[
+        self.blocks = nn.ModuleList([
             SimpleResBlock(base_ch) for _ in range(n_blocks)
         ])
         self.norm_out = nn.GroupNorm(min(8, base_ch), base_ch)
@@ -115,7 +118,8 @@ class ResNetDenoiser(nn.Module):
 
     def forward(self, x):
         x = self.conv_in(x)
-        x = self.blocks(x)
+        for block in self.blocks:
+            x = checkpoint(block, x, use_reentrant=False)
         x = F.silu(self.norm_out(x))
         x = self.conv_out(x)
         return x

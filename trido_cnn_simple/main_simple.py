@@ -36,7 +36,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('TriDo-Simple CNN Denoising', add_help=True)
 
     # --- Training ---
-    parser.add_argument('--batch_size', default=48, type=int)
+    parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=1e-5)
